@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Secrets
+.env
+
+# Logs
+logs/
+*.log
+
+# SQLite DB
+trading_log.db

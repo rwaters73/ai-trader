@@ -6,8 +6,12 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY
-
+from config import (
+    ALPACA_API_KEY_ID,
+    ALPACA_API_SECRET_KEY,
+    INTRADAY_LOOKBACK_MINUTES,
+    INTRADAY_BAR_SIZE_MINUTES,
+)
 
 # One shared data client for the process
 _data_client = StockHistoricalDataClient(
@@ -30,43 +34,90 @@ def get_recent_history(symbol: str, lookback_days: int = 60) -> pd.DataFrame:
     Fetch recent DAILY OHLCV bars for `symbol` over the last `lookback_days`.
 
     Returns:
-        A pandas DataFrame indexed by timestamp, with columns like
+        A pandas DataFrame indexed by timestamp, with columns such as:
         ['open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap'].
 
     Uses the IEX feed to avoid SIP permission issues.
     """
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=lookback_days)
+    end_timestamp = datetime.now(timezone.utc)
+    start_timestamp = end_timestamp - timedelta(days=lookback_days)
 
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
         timeframe=TimeFrame(1, TimeFrameUnit.Day),  # 1-day bars
-        start=start,
-        end=end,
-        feed="iex",  # IMPORTANT: avoid SIP subscription errors
+        start=start_timestamp,
+        end=end_timestamp,
+        feed="iex",
     )
 
-    bars = _data_client.get_stock_bars(request)
+    bars_response = _data_client.get_stock_bars(request)
 
-    # Alpaca's response object usually has a `.df` attribute.
-    if hasattr(bars, "df"):
-        df = bars.df
+    if hasattr(bars_response, "df"):
+        daily_bars_data_frame = bars_response.df
     else:
-        # Fallback: try to interpret directly as a DataFrame-like structure.
         try:
-            df = pd.DataFrame(bars)
+            daily_bars_data_frame = pd.DataFrame(bars_response)
         except Exception:
             return pd.DataFrame()
 
-    if df.empty:
-        return df
+    if daily_bars_data_frame.empty:
+        return daily_bars_data_frame
 
-    # If multiple symbols were requested, bars.df has a MultiIndex (symbol, timestamp).
-    # We requested a single symbol, but we still handle the MultiIndex shape for safety.
-    if isinstance(df.index, pd.MultiIndex) and "symbol" in df.index.names:
-        df = df.xs(symbol, level="symbol")
+    # Handle possible MultiIndex (symbol, timestamp) from Alpaca.
+    if (
+        isinstance(daily_bars_data_frame.index, pd.MultiIndex)
+        and "symbol" in daily_bars_data_frame.index.names
+    ):
+        daily_bars_data_frame = daily_bars_data_frame.xs(symbol, level="symbol")
 
-    # Ensure rows are in ascending time order
-    df = df.sort_index()
+    daily_bars_data_frame = daily_bars_data_frame.sort_index()
 
-    return df
+    return daily_bars_data_frame
+
+def get_intraday_history(
+    symbol: str,
+    lookback_minutes: int = INTRADAY_LOOKBACK_MINUTES,
+    bar_size_minutes: int = INTRADAY_BAR_SIZE_MINUTES,
+) -> pd.DataFrame:
+    """
+    Fetch recent INTRADAY OHLCV bars for `symbol`.
+
+    - lookback_minutes: how far back to fetch (e.g., last 60 minutes).
+    - bar_size_minutes: bar size in minutes (e.g., 5-minute bars).
+
+    Returns:
+        A pandas DataFrame indexed by timestamp, with OHLCV columns.
+    """
+    end_timestamp = datetime.now(timezone.utc)
+    start_timestamp = end_timestamp - timedelta(minutes=lookback_minutes)
+
+    request = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame(bar_size_minutes, TimeFrameUnit.Minute),
+        start=start_timestamp,
+        end=end_timestamp,
+        feed="iex",
+    )
+
+    bars_response = _data_client.get_stock_bars(request)
+
+    if hasattr(bars_response, "df"):
+        intraday_bars_data_frame = bars_response.df
+    else:
+        try:
+            intraday_bars_data_frame = pd.DataFrame(bars_response)
+        except Exception:
+            return pd.DataFrame()
+
+    if intraday_bars_data_frame.empty:
+        return intraday_bars_data_frame
+
+    if (
+        isinstance(intraday_bars_data_frame.index, pd.MultiIndex)
+        and "symbol" in intraday_bars_data_frame.index.names
+    ):
+        intraday_bars_data_frame = intraday_bars_data_frame.xs(symbol, level="symbol")
+
+    intraday_bars_data_frame = intraday_bars_data_frame.sort_index()
+
+    return intraday_bars_data_frame

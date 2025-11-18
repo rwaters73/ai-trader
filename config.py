@@ -160,6 +160,24 @@ ENTRY_LIMIT_OFFSET_PCT = 0.1
 UPTREND_TOLERANCE_PCT = 0.5
 
 # ---------------------------------------------------------------------------
+# Intraday confirmation configuration (hybrid daily + intraday)
+# ---------------------------------------------------------------------------
+
+# How far back to look intraday when confirming a daily breakout, in minutes.
+INTRADAY_LOOKBACK_MINUTES = 60  # last 60 minutes
+
+# Size of each intraday bar in minutes (e.g., 1-minute, 5-minute).
+INTRADAY_BAR_SIZE_MINUTES = 5
+
+# Minimum number of intraday bars required before we trust intraday confirmation.
+MIN_INTRADAY_BARS_FOR_CONFIRMATION = 3
+
+# Maximum allowed pullback from the daily-based limit price, in percent.
+# Example: 1.0 -> if intraday last close is more than 1% below the proposed
+# limit price, we veto the trade as "too weak" intraday.
+MAX_INTRADAY_PULLBACK_PCT = 1.0
+
+# ---------------------------------------------------------------------------
 # Per-symbol bracket-style TP/SL percentages
 # (These are *suggested* levels based on entry price; not yet wired to real
 # bracket orders, but we'll use them soon.)

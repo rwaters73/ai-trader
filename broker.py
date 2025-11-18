@@ -6,7 +6,7 @@ from alpaca.trading.requests import (
     MarketOrderRequest,
     LimitOrderRequest,
     GetOrdersRequest,
-    #BracketOrderRequest,
+    # BracketOrderRequest,
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
@@ -17,7 +17,7 @@ try:
 except ImportError:
     StopOrderRequest = None  # type: ignore
 
-from logger import log_order  # CSV order log
+from logger import log_order  # CSV order log (still available if we want it)
 from data import get_latest_quote
 from models import SymbolState, TargetPosition
 from db import log_order_to_db, log_order_event_to_db
@@ -38,46 +38,50 @@ _trading_client = TradingClient(
 )
 
 
+# ---------------------------------------------------------------------------
+# State helpers
+# ---------------------------------------------------------------------------
+
 def build_symbol_state(symbol: str) -> SymbolState:
     """
     Gather quote, position, and open-order info into a SymbolState snapshot.
     """
     quote = get_latest_quote(symbol)
-    bid = quote.bid_price
-    ask = quote.ask_price
+    bid_price = quote.bid_price
+    ask_price = quote.ask_price
 
-    qty, avg_entry_price = get_position_info(symbol)
+    position_quantity, average_entry_price = get_position_info(symbol)
     open_orders_exist = has_open_orders(symbol)
 
     print(f"\n=== {datetime.now().isoformat(timespec='seconds')} | Symbol: {symbol} ===")
-    print(f"Bid: {bid}, Ask: {ask}")
-    print(f"Current open quantity in {symbol}: {qty}")
-    if avg_entry_price is not None:
-        print(f"Average entry price: {avg_entry_price}")
+    print(f"Bid: {bid_price}, Ask: {ask_price}")
+    print(f"Current open quantity in {symbol}: {position_quantity}")
+    if average_entry_price is not None:
+        print(f"Average entry price: {average_entry_price}")
     print(f"Has open orders in {symbol}: {open_orders_exist}")
 
     return SymbolState(
         symbol=symbol,
-        bid=bid,
-        ask=ask,
-        position_qty=qty,
-        avg_entry_price=avg_entry_price,
+        bid=bid_price,
+        ask=ask_price,
+        position_qty=position_quantity,
+        avg_entry_price=average_entry_price,
         has_open_orders=open_orders_exist,
     )
 
 
 def get_position_info(symbol: str) -> tuple[float, Optional[float]]:
     """
-    Return (qty, avg_entry_price) for the symbol in the paper account.
+    Return (position_quantity, average_entry_price) for the symbol in the paper account.
     If no open position, return (0.0, None).
     """
     positions = _trading_client.get_all_positions()
 
-    for pos in positions:
-        if pos.symbol == symbol:
-            qty = float(pos.qty)  # fractional support
-            avg_price = float(pos.avg_entry_price)
-            return qty, avg_price
+    for position in positions:
+        if position.symbol == symbol:
+            position_quantity = float(position.qty)  # fractional support
+            average_price = float(position.avg_entry_price)
+            return position_quantity, average_price
 
     return 0.0, None
 
@@ -97,6 +101,7 @@ def has_open_orders(symbol: str) -> bool:
     open_orders = _trading_client.get_orders(filter=request_params)
     return len(open_orders) > 0
 
+
 def get_open_orders_for_symbol(symbol: str):
     """
     Return a list of OPEN orders for the given symbol.
@@ -110,18 +115,27 @@ def get_open_orders_for_symbol(symbol: str):
     return _trading_client.get_orders(filter=request_params)
 
 
-def submit_market_order(symbol: str, qty: float, side: OrderSide, extended: bool = False):
+# ---------------------------------------------------------------------------
+# Order submission helpers
+# ---------------------------------------------------------------------------
+
+def submit_market_order(
+    symbol: str,
+    quantity: float,
+    side: OrderSide,
+    extended: bool = False,
+):
     """
-    Submit a market order. Returns the Alpaca order object or None
-    if qty is non-positive.
+    Submit a MARKET order. Returns the Alpaca order object or None
+    if quantity is non-positive.
     """
-    if qty <= 0:
-        print(f"[WARN] Not placing order for {symbol}: non-positive qty={qty}")
+    if quantity <= 0:
+        print(f"[WARN] Not placing MARKET order for {symbol}: non-positive quantity={quantity}")
         return None
 
     order_request = MarketOrderRequest(
         symbol=symbol,
-        qty=qty,
+        qty=quantity,  # Alpaca field name is 'qty'
         side=side,
         time_in_force=TimeInForce.DAY,
         extended_hours=extended,
@@ -129,56 +143,11 @@ def submit_market_order(symbol: str, qty: float, side: OrderSide, extended: bool
 
     order = _trading_client.submit_order(order_request)
 
-    # ---- NEW: log order submission ----
+    # Log order submission to DB
     if order is not None:
         log_order_to_db(order)
 
         # If the order is already filled (typical for paper market orders)
-        if order.filled_at is not None:
-            log_order_event_to_db(
-                alpaca_order_id=str(order.id),
-                event_type="filled",
-                filled_qty=float(order.filled_qty or 0),
-                remaining_qty=float(order.qty) - float(order.filled_qty or 0),
-                status=str(order.status)
-            )
-
-    return order
-
-def submit_limit_order(
-    symbol: str,
-    qty: float,
-    side: OrderSide,
-    limit_price: float,
-    extended: bool = False,
-):
-    """
-    Submit a limit order. Returns the Alpaca order object or None
-    if qty is non-positive or limit_price is non-positive.
-    """
-    if qty <= 0:
-        print(f"[WARN] Not placing LIMIT order for {symbol}: non-positive qty={qty}")
-        return None
-
-    if limit_price <= 0:
-        print(f"[WARN] Not placing LIMIT order for {symbol}: non-positive limit_price={limit_price}")
-        return None
-
-    order_request = LimitOrderRequest(
-        symbol=symbol,
-        qty=qty,
-        side=side,
-        time_in_force=TimeInForce.DAY,
-        limit_price=limit_price,
-        extended_hours=extended,
-    )
-
-    order = _trading_client.submit_order(order_request)
-
-    if order is not None:
-        log_order_to_db(order)
-
-        # If it's immediately filled (paper often does this)
         if order.filled_at is not None:
             log_order_event_to_db(
                 alpaca_order_id=str(order.id),
@@ -190,9 +159,57 @@ def submit_limit_order(
 
     return order
 
+
+def submit_limit_order(
+    symbol: str,
+    quantity: float,
+    side: OrderSide,
+    limit_price: float,
+    extended: bool = False,
+):
+    """
+    Submit a LIMIT order. Returns the Alpaca order object or None
+    if quantity is non-positive.
+
+    We normalize limit_price to two decimal places to satisfy US equity
+    tick-size rules (no sub-penny prices).
+    """
+    if quantity <= 0:
+        print(f"[WARN] Not placing LIMIT order for {symbol}: non-positive quantity={quantity}")
+        return None
+
+    # Normalize limit price to cents (2 decimal places)
+    normalized_limit_price = round(float(limit_price), 2)
+
+    order_request = LimitOrderRequest(
+        symbol=symbol,
+        qty=quantity,  # Alpaca field name is 'qty'
+        side=side,
+        limit_price=normalized_limit_price,
+        time_in_force=TimeInForce.DAY,
+        extended_hours=extended,
+    )
+
+    order = _trading_client.submit_order(order_request)
+
+    if order is not None:
+        log_order_to_db(order)
+
+        if order.filled_at is not None:
+            log_order_event_to_db(
+                alpaca_order_id=str(order.id),
+                event_type="filled",
+                filled_qty=float(order.filled_qty or 0),
+                remaining_qty=float(order.qty) - float(order.filled_qty or 0),
+                status=str(order.status),
+            )
+
+    return order
+
+
 def submit_stop_loss_order(
     symbol: str,
-    qty: float,
+    quantity: float,
     stop_price: float,
     extended: bool = False,
 ):
@@ -200,14 +217,14 @@ def submit_stop_loss_order(
     Submit a SELL stop-loss order for an existing LONG position.
 
     This assumes:
-      - We are long the symbol (qty > 0).
+      - We are long the symbol (quantity > 0).
       - We want a STOP-MARKET SELL at stop_price.
 
     If StopOrderRequest is not available in this alpaca-py version, this
     function will log a warning and do nothing.
     """
-    if qty <= 0:
-        print(f"[WARN] Not placing STOP order for {symbol}: non-positive qty={qty}")
+    if quantity <= 0:
+        print(f"[WARN] Not placing STOP order for {symbol}: non-positive quantity={quantity}")
         return None
 
     if stop_price <= 0:
@@ -223,7 +240,7 @@ def submit_stop_loss_order(
 
     order_request = StopOrderRequest(
         symbol=symbol,
-        qty=qty,
+        qty=quantity,  # Alpaca field name is 'qty'
         side=OrderSide.SELL,
         time_in_force=TimeInForce.DAY,
         stop_price=stop_price,
@@ -247,63 +264,9 @@ def submit_stop_loss_order(
     return order
 
 
-
-# def submit_bracket_order(
-#     symbol: str,
-#     qty: float,
-#     entry_limit_price: float,
-#     take_profit_price: float,
-#     stop_loss_price: float,
-#     extended: bool = False,
-# ):
-#     """
-#     Submit a bracket order:
-#        ENTRY:     LIMIT at entry_limit_price
-#        TAKE PROFIT: LIMIT at take_profit_price
-#        STOP LOSS:   STOP at stop_loss_price
-
-#     Returns the main order object from Alpaca.
-#     """
-
-#     if qty <= 0:
-#         print(f"[WARN] Not placing bracket order for {symbol}: qty={qty}")
-#         return None
-
-#     if entry_limit_price <= 0:
-#         print(f"[WARN] Invalid entry_limit_price for bracket order: {entry_limit_price}")
-#         return None
-
-#     if take_profit_price <= 0 or stop_loss_price <= 0:
-#         print(f"[WARN] TP or SL price invalid for bracket order: TP={take_profit_price}, SL={stop_loss_price}")
-#         return None
-
-#     order_request = BracketOrderRequest(
-#         symbol=symbol,
-#         qty=qty,
-#         side=OrderSide.BUY,
-#         time_in_force=TimeInForce.DAY,
-#         extended_hours=extended,
-#         limit_price=entry_limit_price,
-#         take_profit={"limit_price": take_profit_price},
-#         stop_loss={"stop_price": stop_loss_price},
-#     )
-
-#     order = _trading_client.submit_order(order_request)
-
-#     if order is not None:
-#         log_order_to_db(order)
-#         # In case the entry leg fills immediately (paper trading often does)
-#         if order.filled_at is not None:
-#             log_order_event_to_db(
-#                 alpaca_order_id=str(order.id),
-#                 event_type="filled",
-#                 filled_qty=float(order.filled_qty or 0),
-#                 remaining_qty=float(order.qty) - float(order.filled_qty or 0),
-#                 status=str(order.status),
-#             )
-
-#     return order
-
+# ---------------------------------------------------------------------------
+# Position reconciliation and flatten helpers
+# ---------------------------------------------------------------------------
 
 def reconcile_position(state: SymbolState, target: TargetPosition, extended: bool = False):
     """
@@ -317,42 +280,49 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
       - Otherwise → submit a MARKET order.
       - Exits (reducing position) are currently always MARKET.
     """
-    current = state.position_qty
-    desired = target.target_qty
-    delta = desired - current
+    current_position_quantity = state.position_qty
+    target_position_quantity = target.target_qty
+    delta_quantity = target_position_quantity - current_position_quantity
 
-    print(f"{state.symbol}: current={current}, target={desired} | {target.reason}")
+    print(f"{state.symbol}: current={current_position_quantity}, target={target_position_quantity} | {target.reason}")
 
     # No change needed
-    if abs(delta) < 1e-6:
+    if abs(delta_quantity) < 1e-6:
         print(f"{state.symbol}: No change in position. No order placed.")
         return
 
-    side = OrderSide.BUY if delta > 0 else OrderSide.SELL
-    qty = abs(delta)
+    order_side = OrderSide.BUY if delta_quantity > 0 else OrderSide.SELL
+    order_quantity = abs(delta_quantity)
 
     # Determine if this is an ENTRY (flat -> non-flat) or an ADJUST/EXIT
-    is_entry_from_flat = (abs(current) < 1e-6) and (desired > 0)
+    is_entry_from_flat = (abs(current_position_quantity) < 1e-6) and (target_position_quantity > 0)
 
-    if is_entry_from_flat and target.entry_type.lower() == "limit" and target.entry_limit_price is not None:
+    if (
+        is_entry_from_flat
+        and target.entry_type.lower() == "limit"
+        and target.entry_limit_price is not None
+    ):
         print(
-            f"{state.symbol}: Submitting LIMIT {side.name} qty={qty} at "
+            f"{state.symbol}: Submitting LIMIT {order_side.name} quantity={order_quantity} at "
             f"{target.entry_limit_price:.2f} to reach target."
         )
         order = submit_limit_order(
             symbol=state.symbol,
-            qty=qty,
-            side=side,
+            quantity=order_quantity,
+            side=order_side,
             limit_price=target.entry_limit_price,
             extended=extended,
         )
     else:
         # For exits, adjustments, or entries without a valid limit price, use MARKET
-        print(f"{state.symbol}: Submitting MARKET {side.name} qty={qty} to reach target.")
+        print(
+            f"{state.symbol}: Submitting MARKET {order_side.name} "
+            f"quantity={order_quantity} to reach target."
+        )
         order = submit_market_order(
             symbol=state.symbol,
-            qty=qty,
-            side=side,
+            quantity=order_quantity,
+            side=order_side,
             extended=extended,
         )
 
@@ -365,24 +335,33 @@ def flatten_symbol(symbol: str):
     """
     Flatten a single symbol (close long or cover short).
     """
-    qty, _ = get_position_info(symbol)
+    position_quantity, _ = get_position_info(symbol)
 
-    if abs(qty) < 1e-6:
+    if abs(position_quantity) < 1e-6:
         print(f"{symbol}: Already flat. No flatten order placed.")
         return
 
-    side = OrderSide.SELL if qty > 0 else OrderSide.BUY
-    print(f"{symbol}: Flattening position qty={qty} with {side.name} order.")
-    submit_market_order(symbol, qty=abs(qty), side=side, extended=False)
+    order_side = OrderSide.SELL if position_quantity > 0 else OrderSide.BUY
+    print(f"{symbol}: Flattening position quantity={position_quantity} with {order_side.name} order.")
+    submit_market_order(
+        symbol=symbol,
+        quantity=abs(position_quantity),
+        side=order_side,
+        extended=False,
+    )
 
 
-def flatten_all(symbols: list[str]):
+def flatten_all(symbol_list: list[str]):
     """
     Flatten positions for all given symbols.
     """
-    for symbol in symbols:
+    for symbol in symbol_list:
         flatten_symbol(symbol)
 
+
+# ---------------------------------------------------------------------------
+# Open-order management + automatic TP/SL creation
+# ---------------------------------------------------------------------------
 
 def cancel_all_open_orders() -> None:
     """
@@ -417,33 +396,33 @@ def cancel_all_open_orders() -> None:
                 remaining_qty=float(order.qty) - float(order.filled_qty or 0),
                 status="canceled",
             )
-        except Exception as e:
-            print(f"[WARN] Failed to cancel order {order.id}: {e}")
+        except Exception as exception:
+            print(f"[WARN] Failed to cancel order {order.id}: {exception}")
+
 
 def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) -> None:
     """
     If we hold a long position in this symbol and there are no SELL exit orders
-    already open, create a take-profit LIMIT order (and later, a stop-loss order).
+    already open, create a take-profit LIMIT order (and a stop-loss order if supported).
 
     For now:
-      - Only handles LONG positions (qty > 0).
-      - Only creates a TP LIMIT SELL order, using per-symbol TP%.
-      - SIgnals where we would put a SL, but leaves SL as a TODO
-        until we verify the exact stop-order API in this alpaca-py version.
+      - Only handles LONG positions (position_qty > 0).
+      - Creates a TP LIMIT SELL order, using per-symbol TP%.
+      - Attempts a SL STOP order, but may skip if StopOrderRequest is unavailable.
     """
     symbol = state.symbol
-    qty = state.position_qty
-    avg_entry = state.avg_entry_price
+    position_quantity = state.position_qty
+    average_entry_price = state.avg_entry_price
 
     # Only manage exits for LONG positions
-    if qty <= 0 or avg_entry is None:
+    if position_quantity <= 0 or average_entry_price is None:
         return
 
     # If there are already SELL orders open for this symbol, assume exits exist
     open_orders = get_open_orders_for_symbol(symbol)
-    for o in open_orders:
+    for open_order in open_orders:
         try:
-            if str(o.side).lower().endswith("sell"):
+            if str(open_order.side).lower().endswith("sell"):
                 # We already have at least one SELL order; assume TP/SL (or some exit) exists.
                 print(f"{symbol}: SELL exit order(s) already present; not creating new TP/SL.")
                 return
@@ -453,41 +432,44 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
             return
 
     # Compute TP/SL percentages for this symbol
-    tp_pct = BRACKET_TP_PERCENT_BY_SYMBOL.get(symbol, DEFAULT_BRACKET_TP_PERCENT)
-    sl_pct = BRACKET_SL_PERCENT_BY_SYMBOL.get(symbol, DEFAULT_BRACKET_SL_PERCENT)
+    take_profit_percent = BRACKET_TP_PERCENT_BY_SYMBOL.get(symbol, DEFAULT_BRACKET_TP_PERCENT)
+    stop_loss_percent = BRACKET_SL_PERCENT_BY_SYMBOL.get(symbol, DEFAULT_BRACKET_SL_PERCENT)
 
-    take_profit_price = avg_entry * (1.0 + tp_pct / 100.0)
-    stop_loss_price = avg_entry * (1.0 - sl_pct / 100.0)
+    raw_take_profit_price = average_entry_price * (1.0 + take_profit_percent / 100.0)
+    take_profit_price = round(raw_take_profit_price, 2)
+
+    stop_loss_price = average_entry_price * (1.0 - stop_loss_percent / 100.0)
 
     print(
         f"{symbol}: No SELL exits found. Creating TP LIMIT at {take_profit_price:.2f} "
-        f"(+{tp_pct}%) for qty={qty}. Planned SL at {stop_loss_price:.2f} (-{sl_pct}%) [TODO]."
+        f"(+{take_profit_percent}%) for quantity={position_quantity}. "
+        f"Planned SL at {stop_loss_price:.2f} (-{stop_loss_percent}%) [TODO if unsupported]."
     )
 
     # --- Create TP LIMIT SELL order ---
-    tp_order = submit_limit_order(
+    take_profit_order = submit_limit_order(
         symbol=symbol,
-        qty=qty,
+        quantity=position_quantity,
         side=OrderSide.SELL,
         limit_price=take_profit_price,
         extended=extended,
     )
 
-    if tp_order is not None:
+    if take_profit_order is not None:
         print(f"{symbol}: TP LIMIT order submitted:")
-        print(tp_order)
+        print(take_profit_order)
 
     # --- Stop-loss order (if supported) ---
-    sl_order = submit_stop_loss_order(
+    stop_loss_order = submit_stop_loss_order(
         symbol=symbol,
-        qty=qty,
+        quantity=position_quantity,
         stop_price=stop_loss_price,
         extended=extended,
     )
 
-    if sl_order is not None:
+    if stop_loss_order is not None:
         print(f"{symbol}: SL STOP order submitted:")
-        print(sl_order)
+        print(stop_loss_order)
     else:
         # This will fire if StopOrderRequest is missing or validation failed.
         print(

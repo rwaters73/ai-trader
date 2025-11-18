@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 DB_FILE = "trading_log.db"
@@ -123,7 +123,7 @@ def log_order_to_db(order):
     side = str(getattr(order, "side", ""))
     status = str(getattr(order, "status", ""))
 
-    timestamp = datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     cur.execute("""
         INSERT INTO orders (
@@ -156,7 +156,7 @@ def log_order_event_to_db(
     conn = get_connection()
     cur = conn.cursor()
 
-    timestamp = datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     cur.execute("""
         INSERT INTO order_events (

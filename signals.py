@@ -8,6 +8,7 @@ from config import (
     SIGNAL_LOOKBACK_BARS,
     BREAKOUT_TOLERANCE_PCT,
     ENTRY_LIMIT_OFFSET_PCT,
+    UPTREND_TOLERANCE_PCT,   
 )
 
 
@@ -40,13 +41,20 @@ def compute_recent_high_breakout_signal(bars: pd.DataFrame) -> Optional[EntrySig
     Returns:
       - EntrySignal(limit_price, reason) if a trade should be considered.
       - None if no trade.
+
+    NOTE: This version prints debug information explaining WHY it returns None.
     """
 
     if bars is None or bars.empty:
+        print("[signal] No bars provided or DataFrame is empty; cannot compute breakout signal.")
         return None
 
     # We want at least MIN_BARS_FOR_SIGNAL bars total
     if len(bars) < MIN_BARS_FOR_SIGNAL:
+        print(
+            f"[signal] Not enough bars for breakout signal: "
+            f"have {len(bars)}, need at least {MIN_BARS_FOR_SIGNAL}."
+        )
         return None
 
     # Last bar is "current", the rest are history
@@ -59,9 +67,11 @@ def compute_recent_high_breakout_signal(bars: pd.DataFrame) -> Optional[EntrySig
 
     # Basic sanity checks
     if "high" not in history or "close" not in history:
+        print("[signal] Missing 'high' or 'close' columns in history; cannot compute breakout.")
         return None
 
     if "close" not in current:
+        print("[signal] Current bar missing 'close' field; cannot compute breakout.")
         return None
 
     recent_high = history["high"].max()
@@ -70,11 +80,28 @@ def compute_recent_high_breakout_signal(bars: pd.DataFrame) -> Optional[EntrySig
 
     # If we somehow have NaNs, bail out
     if pd.isna(recent_high) or pd.isna(recent_sma) or pd.isna(current_close):
+        print(
+            "[signal] NaN encountered in recent_high/recent_sma/current_close; "
+            "cannot compute breakout signal."
+        )
         return None
 
-    # Uptrend filter: current close should be above the recent SMA
-    if current_close <= recent_sma:
+    # Uptrend filter: allow price to be up to UPTREND_TOLERANCE_PCT below SMA.
+    min_uptrend_level = recent_sma * (1.0 - UPTREND_TOLERANCE_PCT / 100.0)
+
+    if current_close < min_uptrend_level:
+        print(
+            "[signal] Uptrend filter failed: "
+            f"current_close={current_close:.2f} < min_uptrend_level={min_uptrend_level:.2f} "
+            f"(recent_sma={recent_sma:.2f}, tolerance={UPTREND_TOLERANCE_PCT:.2f}%)."
+        )
         return None
+    else:
+        print(
+            "[signal] Uptrend filter passed: "
+            f"current_close={current_close:.2f} >= min_uptrend_level={min_uptrend_level:.2f} "
+            f"(recent_sma={recent_sma:.2f}, tolerance={UPTREND_TOLERANCE_PCT:.2f}%)."
+        )
 
     # Breakout condition: current close within tolerance of recent_high or above
     tolerance_factor = 1.0 + (BREAKOUT_TOLERANCE_PCT / 100.0)
@@ -82,6 +109,11 @@ def compute_recent_high_breakout_signal(bars: pd.DataFrame) -> Optional[EntrySig
 
     if current_close < min_breakout_level:
         # Not close enough to the recent high to consider a breakout
+        print(
+            "[signal] Breakout filter failed: "
+            f"current_close={current_close:.2f} < min_breakout_level={min_breakout_level:.2f} "
+            f"(recent_high={recent_high:.2f}, tolerance={BREAKOUT_TOLERANCE_PCT:.2f}%)."
+        )
         return None
 
     # Suggest a limit price slightly below the current close
@@ -95,4 +127,38 @@ def compute_recent_high_breakout_signal(bars: pd.DataFrame) -> Optional[EntrySig
         f"Proposed limit entry at {limit_price:.2f}."
     )
 
+    print(
+        "[signal] Breakout signal GENERATED: "
+        f"close={current_close:.2f}, recent_high={recent_high:.2f}, "
+        f"recent_sma={recent_sma:.2f}, limit_price={limit_price:.2f}."
+    )
+
     return EntrySignal(limit_price=limit_price, reason=reason)
+
+if __name__ == "__main__":
+    # Simple manual test harness for the breakout signal over all configured symbols.
+
+    from data import get_recent_history
+    from config import SYMBOLS
+
+    if not SYMBOLS:
+        print("[test] No symbols configured in SYMBOLS.")
+    else:
+        for test_symbol in SYMBOLS:
+            print("\n" + "=" * 70)
+            print(f"[test] Fetching recent history for {test_symbol}...")
+            df = get_recent_history(test_symbol, lookback_days=60)
+
+            if df is None or df.empty:
+                print(f"[test] No history returned for {test_symbol}.")
+                continue
+
+            print(f"[test] Got {len(df)} daily bars for {test_symbol}.")
+            signal = compute_recent_high_breakout_signal(df)
+
+            if signal is None:
+                print(f"[test] No entry signal generated for {test_symbol}.")
+            else:
+                print(f"[test] Entry signal generated for {test_symbol}:")
+                print(f"       limit_price = {signal.limit_price:.2f}")
+                print(f"       reason      = {signal.reason}")

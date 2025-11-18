@@ -6,6 +6,10 @@ from config import (
     DEFAULT_TP_PERCENT,
     BUY_QTY_BY_SYMBOL,
     DEFAULT_BUY_QTY,
+    BRACKET_TP_PERCENT_BY_SYMBOL,
+    DEFAULT_BRACKET_TP_PERCENT,
+    BRACKET_SL_PERCENT_BY_SYMBOL,
+    DEFAULT_BRACKET_SL_PERCENT,
 )
 
 from history import fetch_price_history
@@ -64,8 +68,9 @@ def decide_target_position(state: SymbolState) -> TargetPosition:
                 symbol=state.symbol,
                 target_qty=0.0,
                 reason=(
-                    "Flat; no recent-high breakout signal generated for "
-                    f"{state.symbol} given current history."
+                    "Flat; no recent-high breakout entry signal. "
+                    "See [signal] debug logs for details about bars count, "
+                    "uptrend (close vs SMA), and breakout tolerance checks."
                 ),
             )
 
@@ -99,17 +104,32 @@ def decide_target_position(state: SymbolState) -> TargetPosition:
             )
 
         # If we get here: we have a breakout signal and price is below our guardrail.
-        # For now, we still enter via MARKET order; the signal's suggested limit
-        # price is included in the explanation for logging/analysis.
+        # Use the signal's suggested limit price as our entry price.
+        entry_price = signal.limit_price
+
+        # Per-symbol bracket-style TP/SL percentages
+        tp_pct = BRACKET_TP_PERCENT_BY_SYMBOL.get(state.symbol, DEFAULT_BRACKET_TP_PERCENT)
+        sl_pct = BRACKET_SL_PERCENT_BY_SYMBOL.get(state.symbol, DEFAULT_BRACKET_SL_PERCENT)
+
+        # Compute absolute TP/SL levels from the entry price
+        take_profit_price = entry_price * (1.0 + tp_pct / 100.0)
+        stop_loss_price   = entry_price * (1.0 - sl_pct / 100.0)
+
         return TargetPosition(
             symbol=state.symbol,
             target_qty=buy_qty,
             reason=(
                 signal.reason
-                + " Using market entry for now "
+                + " Using LIMIT entry based on signal "
                   f"(ref_price={ref_price:.2f} < max_entry_price={max_entry_price:.2f}, "
-                  f"qty={buy_qty})."
+                  f"qty={buy_qty}, limit={entry_price:.2f}, "
+                  f"TP={take_profit_price:.2f} (+{tp_pct}%), "
+                  f"SL={stop_loss_price:.2f} (-{sl_pct}%))."
             ),
+            entry_type="limit",
+            entry_limit_price=entry_price,
+            take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price,
         )
 
     # ----------------------------------------------------

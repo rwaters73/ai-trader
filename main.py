@@ -3,7 +3,14 @@ import time
 from logger import init_decision_log, init_order_log, log_decision
 from db import init_db, log_decision_to_db
 from config import SYMBOLS, ITERATIONS, INTERVAL_SECONDS
-from broker import build_symbol_state, reconcile_position, cancel_all_open_orders
+from broker import (
+    build_symbol_state,
+    reconcile_position,
+    flatten_symbol,
+    cancel_all_open_orders,
+    get_position_info,
+    ensure_exit_orders_for_symbol,
+)
 from models import SymbolState
 from strategy import decide_target_position
 from eod_policy import apply_eod_policy
@@ -141,6 +148,10 @@ def main():
                     )
 
                     reconcile_position(state, target, extended=in_ext)
+
+                    # After any entry/exit adjustments for this symbol, ensure that
+                    # if we hold a long position, we have a TP exit order on the book.
+                    ensure_exit_orders_for_symbol(state, extended=in_ext)
 
                 # After we've processed ALL symbols in the EOD window, we can exit gracefully
                 if in_eod:

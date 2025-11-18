@@ -12,11 +12,11 @@ if not ALPACA_API_KEY_ID or not ALPACA_API_SECRET_KEY:
     raise RuntimeError("Alpaca API keys are missing. Check your .env file.")
 
 # Symbols you want the bot to manage
-SYMBOLS = ["AAPL", "TSLA", "BRK.B", "GME"]
+SYMBOLS = ["AAPL", "TSLA", "BRK.B", "GME", "JNJ", "T", "AMZN", "BRCC"]
 
 # Loop settings
-ITERATIONS = 2160          # how many cycles to run before exiting
-INTERVAL_SECONDS = 5    # seconds between cycles
+ITERATIONS = 5000          # how many cycles to run before exiting
+INTERVAL_SECONDS = 1    # seconds between cycles
 
 # Per-symbol entry thresholds (max price at which we are willing to ENTER)
 # You can adjust these per symbol as you see fit.
@@ -25,6 +25,10 @@ MAX_ENTRY_PRICE_BY_SYMBOL = {
     "TSLA": 400.0,
     "BRK.B": 500.0,
     "GME": 20.075,
+    "JNJ": 199.22,
+    "T": 25.40,
+    "AMZN": 230.00,
+    "BRCC": 1.20,
 }
 
 # Fallback if a symbol isn't in MAX_ENTRY_PRICE_BY_SYMBOL
@@ -47,6 +51,10 @@ BUY_QTY_BY_SYMBOL = {
     "TSLA": 1.0,
     "BRK.B": 1.0,
     "GME": 20.0,
+    "JNJ": 2.0,
+    "T": 10.0,
+    "AMZN": 1.0,
+    "BRCC": 100.0,
 }
 
 # Fallback buy qty if a symbol isn't explicitly configured
@@ -86,6 +94,21 @@ EOD_POLICIES = {
         "type": "min_profit_flatten",
         "min_pnl_pct": 1.0,
     },
+    "JNJ": {
+        "type": "always_flatten",
+    },
+    "T": {
+        "type": "always_flatten",
+    },
+    "AMZN": {
+        "type": "always_flatten",
+    },
+    "BRK.B": {
+        "type": "band_hold",
+        "min_pnl_pct": -5.0,
+        "max_pnl_pct": 5.0,
+    },
+
 }
 
 # Default EOD behavior when a symbol has no specific policy
@@ -117,17 +140,44 @@ INTRADAY_TIMEFRAME_MINUTES = 5      # 1, 5, 15, etc.
 # ---------------------------------------------------------------------------
 
 # Minimum number of bars required to even consider a signal
-MIN_BARS_FOR_SIGNAL = 10
+MIN_BARS_FOR_SIGNAL = 30
 
 # How many of the most recent bars (excluding the last) to use when
 # computing recent_high and SMA. If there are fewer than this number,
 # we'll just use all available bars except the last.
-SIGNAL_LOOKBACK_BARS = 20
+SIGNAL_LOOKBACK_BARS = 10
 
 # How close the current close must be to the recent_high (in percent)
 # Example: 0.5 means within 0.5% of recent_high or above it.
-BREAKOUT_TOLERANCE_PCT = 0.5
+BREAKOUT_TOLERANCE_PCT = 1.5
 
 # Where to place the suggested limit price relative to the last close
 # Example: 0.1 means 0.1% below the last close (slightly favorable fill).
 ENTRY_LIMIT_OFFSET_PCT = 0.1
+
+# How far below the recent SMA we are willing to tolerate and still call it an "uptrend".
+# Example: 0.5 means we allow price to be up to 0.5% below the SMA.
+UPTREND_TOLERANCE_PCT = 0.5
+
+# ---------------------------------------------------------------------------
+# Per-symbol bracket-style TP/SL percentages
+# (These are *suggested* levels based on entry price; not yet wired to real
+# bracket orders, but we'll use them soon.)
+# ---------------------------------------------------------------------------
+
+BRACKET_TP_PERCENT_BY_SYMBOL = {
+    "AAPL": 5.0,   # +5% take profit
+    "TSLA": 8.0,
+    "BRK.B": 3.0,
+    "GME": 10.0,
+}
+
+BRACKET_SL_PERCENT_BY_SYMBOL = {
+    "AAPL": 2.0,   # -2% stop loss
+    "TSLA": 4.0,
+    "BRK.B": 1.5,
+    "GME": 5.0,
+}
+
+DEFAULT_BRACKET_TP_PERCENT = 5.0
+DEFAULT_BRACKET_SL_PERCENT = 2.0

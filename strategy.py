@@ -150,9 +150,11 @@ def _decide_entry_from_daily_and_intraday(state: SymbolState) -> TargetPosition:
     # Intraday confirmation passed: we are willing to enter.
     # Here is where we tell the broker layer to use a LIMIT entry.
     # ----------------------------------------------------
-    # Intraday confirmation passed: we are willing to enter via LIMIT.
+    # Intraday confirmation passed: we are willing to enter.
     buy_quantity = _get_buy_quantity_for_symbol(symbol)
 
+    # Express this as a LIMIT entry so the broker layer can place a limit order
+    # at the breakout-derived price.
     return TargetPosition(
         symbol=symbol,
         target_qty=buy_quantity,
@@ -163,9 +165,6 @@ def _decide_entry_from_daily_and_intraday(state: SymbolState) -> TargetPosition:
         ),
         entry_type="limit",
         entry_limit_price=proposed_limit_price,
-        # We could set take_profit_price / stop_loss_price here in the future,
-        # but for now we leave them as None and let the separate exit logic
-        # (ensure_exit_orders_for_symbol) manage TP/SL based on config.
     )
 
 

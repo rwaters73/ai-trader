@@ -135,6 +135,93 @@ def compute_recent_high_breakout_signal(bars: pd.DataFrame) -> Optional[EntrySig
 
     return EntrySignal(limit_price=limit_price, reason=reason)
 
+
+def compute_sma_trend_entry_signal(bars: pd.DataFrame) -> Optional[EntrySignal]:
+    """
+    Inspect recent OHLCV bars and decide whether to propose a long entry
+    based on a simple SMA trend idea.
+
+    Logic:
+      - Require at least MIN_BARS_FOR_SIGNAL bars.
+      - Use up to SIGNAL_LOOKBACK_BARS most recent bars as history.
+      - Compute:
+          * long_sma  = SMA of all history closes
+          * short_sma = SMA of the most recent half of that history
+      - Conditions for an entry:
+          * closing prices are generally trending up (last_close > first_close)
+          * short_sma > long_sma  (short-term strength > long-term)
+          * last_close > short_sma (price above fast SMA)
+          * last_close is NOT too far above short_sma
+            (capped by BREAKOUT_TOLERANCE_PCT to avoid chasing extremes)
+      - If conditions pass, propose a limit entry slightly below last_close
+        using ENTRY_LIMIT_OFFSET_PCT.
+
+    Returns:
+      - EntrySignal(limit_price, reason) if a trade should be considered.
+      - None if no trade.
+    """
+
+    if bars is None or bars.empty:
+        return None
+
+    if len(bars) < MIN_BARS_FOR_SIGNAL:
+        return None
+
+    # Limit history length to the most recent SIGNAL_LOOKBACK_BARS
+    if len(bars) > SIGNAL_LOOKBACK_BARS:
+        history_for_signal = bars.iloc[-SIGNAL_LOOKBACK_BARS:]
+    else:
+        history_for_signal = bars
+
+    if "close" not in history_for_signal:
+        return None
+
+    closes_series = history_for_signal["close"].astype(float)
+
+    if closes_series.isna().any():
+        return None
+
+    first_close = float(closes_series.iloc[0])
+    last_close = float(closes_series.iloc[-1])
+
+    # Require an upward drift in closes
+    if last_close <= first_close:
+        return None
+
+    long_sma = float(closes_series.mean())
+
+    # Define a short SMA over the most recent half of the history (at least 3 bars)
+    short_window_size = max(3, min(len(closes_series) // 2, SIGNAL_LOOKBACK_BARS // 2))
+    short_sma = float(closes_series.tail(short_window_size).mean())
+
+    # Short-term trend should be stronger than long-term
+    if short_sma <= long_sma:
+        return None
+
+    # Price should be above the short SMA (momentum in our direction)
+    if last_close <= short_sma:
+        return None
+
+    # Do not chase price if it is too extended above short_sma
+    max_extension_factor = 1.0 + (BREAKOUT_TOLERANCE_PCT / 100.0)
+    if last_close > short_sma * max_extension_factor:
+        return None
+
+    # Suggest a limit price slightly below the last close
+    limit_offset_factor = 1.0 - (ENTRY_LIMIT_OFFSET_PCT / 100.0)
+    limit_price = last_close * limit_offset_factor
+
+    reason = (
+        "SMA trend signal: closes trending up, "
+        f"short_SMA={short_sma:.2f} > long_SMA={long_sma:.2f}, "
+        f"last_close={last_close:.2f} above short_SMA but not extended by more than "
+        f"{BREAKOUT_TOLERANCE_PCT:.2f}%. Proposed limit entry at {limit_price:.2f}."
+    )
+
+    return EntrySignal(limit_price=limit_price, reason=reason)
+
+
+
 if __name__ == "__main__":
     # Simple manual test harness for the breakout signal over all configured symbols.
 

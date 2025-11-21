@@ -14,9 +14,15 @@ from config import (
     DEFAULT_BRACKET_SL_PERCENT,
     BUY_QTY_BY_SYMBOL,
     DEFAULT_BUY_QTY,
+    MAX_INTRADAY_PULLBACK_PCT,
+    MIN_INTRADAY_BARS_FOR_CONFIRMATION,
 )
 from signals import compute_recent_high_breakout_signal, EntrySignal
 
+INTRADAY_CSV_BY_SYMBOL = {
+    "TSLA": Path("data") / "TSLA_intraday_5min.csv",
+    # later you can add AAPL, etc.
+}
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -182,6 +188,86 @@ def write_trades_to_csv(summary: BacktestSummary, output_path: Path) -> None:
 
     print(f"[backtest] Wrote {len(rows)} trades to {output_path}")
 
+def load_intraday_bars(csv_path: Path) -> pd.DataFrame:
+    """
+    Load intraday OHLCV bars from a CSV created by tools/download_intraday_history.py.
+    Expects a 'timestamp' column.
+    """
+    if not csv_path.exists():
+        print(f"[backtest] No intraday CSV found at {csv_path}. Intraday confirmation will be skipped.")
+        return pd.DataFrame()
+
+    df = pd.read_csv(csv_path)
+
+    if "timestamp" not in df.columns:
+        print(f"[backtest] Intraday CSV at {csv_path} missing 'timestamp' column.")
+        return pd.DataFrame()
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    df = df.sort_values("timestamp")
+
+    return df
+
+def intraday_confirms_daily_breakout(
+    symbol: str,
+    entry_date: pd.Timestamp,
+    proposed_limit_price: float,
+    intraday_bars: pd.DataFrame,
+) -> bool:
+    """
+    Check whether intraday data confirms a daily breakout entry.
+
+    Rule (mirrors live bot):
+      - Look at intraday bars for the same calendar day as `entry_date`.
+      - If there are fewer than MIN_INTRADAY_BARS_FOR_CONFIRMATION rows, return False.
+      - Take the latest close for that day.
+      - If last_intraday_close < proposed_limit_price * (1 - MAX_INTRADAY_PULLBACK_PCT/100),
+        then intraday confirmation FAILS.
+      - Otherwise PASS.
+    """
+    if intraday_bars.empty:
+        print(f"[backtest][{symbol}] No intraday bars loaded; skipping intraday confirmation.")
+        return True  # or False, depending how strict you want to be; I'd default to True in backtest
+
+    # Normalize entry_date to date only (UTC)
+    entry_date_utc = entry_date.tz_localize("UTC") if entry_date.tzinfo is None else entry_date
+    entry_day = entry_date_utc.date()
+
+    day_mask = intraday_bars["timestamp"].dt.date == entry_day
+    day_bars = intraday_bars.loc[day_mask]
+
+    if day_bars.empty:
+        print(f"[backtest][{symbol}] No intraday bars for {entry_day}; skipping intraday confirmation.")
+        return True  # again, default to True here to avoid discarding trades only due to missing data
+
+    if len(day_bars) < MIN_INTRADAY_BARS_FOR_CONFIRMATION:
+        print(
+            f"[backtest][{symbol}] Only {len(day_bars)} intraday bars for {entry_day}; "
+            f"need {MIN_INTRADAY_BARS_FOR_CONFIRMATION}. Skipping intraday confirmation."
+        )
+        return True  # or False if you want strict behavior
+
+    last_intraday_close = float(day_bars["close"].iloc[-1])
+    allowed_min_price = proposed_limit_price * (1.0 - MAX_INTRADAY_PULLBACK_PCT / 100.0)
+
+    if last_intraday_close < allowed_min_price:
+        pullback_pct = (proposed_limit_price - last_intraday_close) / proposed_limit_price * 100.0
+        print(
+            f"[backtest][{symbol}] Intraday confirmation FAILED on {entry_day}: "
+            f"last_close={last_intraday_close:.2f} is {pullback_pct:.2f}% below "
+            f"proposed_limit={proposed_limit_price:.2f}, which exceeds "
+            f"MAX_INTRADAY_PULLBACK_PCT={MAX_INTRADAY_PULLBACK_PCT:.2f}%."
+        )
+        return False
+
+    print(
+        f"[backtest][{symbol}] Intraday confirmation PASSED on {entry_day}: "
+        f"last_close={last_intraday_close:.2f} within "
+        f"{MAX_INTRADAY_PULLBACK_PCT:.2f}% pullback of {proposed_limit_price:.2f}."
+    )
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Core backtest logic
@@ -191,6 +277,7 @@ def run_backtest_for_symbol(
     symbol: str,
     csv_path: Path,
     starting_cash: float = 100_000.0,
+    intraday_csv_path: Optional[Path] = None,
 ) -> BacktestSummary:
     """
     Simple daily-bar backtest for your breakout strategy on a single symbol.
@@ -219,6 +306,11 @@ def run_backtest_for_symbol(
             ending_cash=starting_cash,
             trades=[],
         )
+
+    # Load intraday data (if provided)
+    intraday_bars = pd.DataFrame()
+    if intraday_csv_path is not None:
+        intraday_bars = load_intraday_bars(intraday_csv_path)
 
     take_profit_percent = get_take_profit_percent_for_symbol(symbol)
     stop_loss_percent = get_stop_loss_percent_for_symbol(symbol)

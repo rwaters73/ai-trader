@@ -1,8 +1,17 @@
-# tools/download_history.py
+"""
+Download intraday (minute) OHLCV bars from Alpaca and save to CSV.
+
+Usage (from repo root):
+    python -m tools.download_intraday_history
+
+This will download 5-minute bars for TSLA for the last N days and write:
+    data/TSLA_intraday_5m.csv
+"""
+
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import os
-from typing import Optional
+from pathlib import Path
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
@@ -12,105 +21,95 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY
 
 
-# One shared client for this script
-historical_data_client = StockHistoricalDataClient(
-    api_key=ALPACA_API_KEY_ID,
-    secret_key=ALPACA_API_SECRET_KEY,
-)
+# ------------- CONFIG -------------
+SYMBOL = "TSLA"
+
+# how far back to fetch intraday history
+LOOKBACK_DAYS = 30
+
+# bar size (in minutes)
+BAR_SIZE_MINUTES = 5
+
+# use IEX feed (since that's what your live code uses)
+DATA_FEED = "iex"
+
+OUTPUT_DIR = Path("data")
+OUTPUT_FILENAME = f"{SYMBOL}_intraday_{BAR_SIZE_MINUTES}m.csv"
+# ----------------------------------
 
 
-def download_daily_history_for_symbol(
+def get_intraday_bars_dataframe(
     symbol: str,
-    number_of_years: int = 3,
-    feed_name: str = "iex",
-    output_file_path: Optional[str] = None,
-) -> None:
-    """
-    Download daily OHLCV bars for `symbol` using Alpaca and write them
-    to a CSV file.
+    lookback_days: int,
+    bar_size_minutes: int,
+    feed: str = "iex",
+) -> pd.DataFrame:
+    """Fetch intraday minute bars for a symbol as a pandas DataFrame."""
 
-    Columns in the CSV:
-        timestamp, open, high, low, close, volume
-
-    - number_of_years: how many years of history to request (approximate).
-    - feed_name: typically "iex" for your current subscription tier.
-    - output_file_path: if None, writes to data/{symbol}_daily.csv
-    """
-    end_timestamp = datetime.now(timezone.utc)
-    start_timestamp = end_timestamp - timedelta(days=365 * number_of_years)
-
-    print(
-        f"[download] Requesting ~{number_of_years} years of DAILY bars for {symbol} "
-        f"from {start_timestamp.isoformat()} to {end_timestamp.isoformat()} using feed={feed_name}..."
+    data_client = StockHistoricalDataClient(
+        api_key=ALPACA_API_KEY_ID,
+        secret_key=ALPACA_API_SECRET_KEY,
     )
+
+    end_timestamp = datetime.now(timezone.utc)
+    start_timestamp = end_timestamp - timedelta(days=lookback_days)
 
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame(1, TimeFrameUnit.Day),
+        timeframe=TimeFrame(bar_size_minutes, TimeFrameUnit.Minute),
         start=start_timestamp,
         end=end_timestamp,
-        feed=feed_name,
+        feed=feed,
     )
 
-    bars_response = historical_data_client.get_stock_bars(request)
+    bars_response = data_client.get_stock_bars(request)
 
-    # Alpaca's response usually has a .df attribute with a MultiIndex
     if hasattr(bars_response, "df"):
         bars_dataframe = bars_response.df
     else:
-        # Fallback, though this is unlikely needed
         bars_dataframe = pd.DataFrame(bars_response)
 
-    if bars_dataframe is None or bars_dataframe.empty:
-        print(f"[download] No data received for {symbol}. Nothing written.")
-        return
+    if bars_dataframe.empty:
+        print(f"[download_intraday] No intraday bars returned for {symbol}.")
+        return bars_dataframe
 
-    # If it is a MultiIndex with 'symbol' as one of the levels, select the symbol
-    if (
-        isinstance(bars_dataframe.index, pd.MultiIndex)
-        and "symbol" in bars_dataframe.index.names
-    ):
+    # If index is MultiIndex (symbol, timestamp), slice by symbol and drop the symbol level.
+    if bars_dataframe.index.nlevels > 1 and "symbol" in bars_dataframe.index.names:
         bars_dataframe = bars_dataframe.xs(symbol, level="symbol")
 
-    # Ensure bars are sorted by timestamp
+    # Ensure sorted by time
     bars_dataframe = bars_dataframe.sort_index()
 
-    # Keep only the columns we care about
-    required_columns = ["open", "high", "low", "close", "volume"]
-    missing_columns = [column_name for column_name in required_columns if column_name not in bars_dataframe.columns]
-    if missing_columns:
-        print(
-            f"[download] WARNING: Missing columns {missing_columns} in data for {symbol}. "
-            f"Available columns: {list(bars_dataframe.columns)}"
-        )
+    # Make the index a plain column for easier CSV handling
+    bars_dataframe = bars_dataframe.reset_index().rename(columns={"timestamp": "timestamp_utc"})
 
-    # Select intersection of required and available columns
-    available_columns = [column_name for column_name in required_columns if column_name in bars_dataframe.columns]
-    cleaned_dataframe = bars_dataframe[available_columns].copy()
+    return bars_dataframe
 
-    # Move timestamp index into a regular column
-    cleaned_dataframe = cleaned_dataframe.reset_index()
 
-    # Alpaca typically names the index column "timestamp"; if not, rename it
-    if "timestamp" not in cleaned_dataframe.columns:
-        # Assume the first column is the timestamp-like column
-        first_column_name = cleaned_dataframe.columns[0]
-        cleaned_dataframe = cleaned_dataframe.rename(columns={first_column_name: "timestamp"})
-
-    # Decide where to save the file
-    if output_file_path is None:
-        data_directory = os.path.join("data")
-        os.makedirs(data_directory, exist_ok=True)
-        output_file_path = os.path.join(data_directory, f"{symbol}_daily.csv")
-
-    cleaned_dataframe.to_csv(output_file_path, index=False)
+def main() -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT_DIR / OUTPUT_FILENAME
 
     print(
-        f"[download] Wrote {len(cleaned_dataframe)} rows for {symbol} "
-        f"to {output_file_path}"
+        f"[download_intraday] Fetching {BAR_SIZE_MINUTES}-minute bars for "
+        f"{SYMBOL} over last {LOOKBACK_DAYS} days (feed={DATA_FEED})..."
     )
+
+    bars_dataframe = get_intraday_bars_dataframe(
+        symbol=SYMBOL,
+        lookback_days=LOOKBACK_DAYS,
+        bar_size_minutes=BAR_SIZE_MINUTES,
+        feed=DATA_FEED,
+    )
+
+    if bars_dataframe.empty:
+        print("[download_intraday] No data fetched. Aborting.")
+        return
+
+    print(f"[download_intraday] Got {len(bars_dataframe)} rows. Writing to {output_path}...")
+    bars_dataframe.to_csv(output_path, index=False)
+    print("[download_intraday] Done.")
 
 
 if __name__ == "__main__":
-    # For now, we hard-code TSLA and 3 years as agreed
-    download_daily_history_for_symbol(symbol="TSLA", number_of_years=3)
+    main()

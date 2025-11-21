@@ -1,115 +1,96 @@
+# tools/download_history.py
 """
-Download intraday (minute) OHLCV bars from Alpaca and save to CSV.
+Download DAILY OHLCV history for GME and save it to data/GME_daily.csv.
 
-Usage (from repo root):
-    python -m tools.download_intraday_history
+Run from the project root, e.g.:
 
-This will download 5-minute bars for TSLA for the last N days and write:
-    data/TSLA_intraday_5m.csv
+    python tools\download_history.py
 """
 
-from __future__ import annotations
-
+import os
+import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY
+# -------------------------------------------------------------------
+# Ensure we can import from the project root (config, etc.)
+# -------------------------------------------------------------------
+CURRENT_DIRECTORY = os.path.dirname(__file__)
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIRECTORY, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
+from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY  # noqa: E402
 
-# ------------- CONFIG -------------
+# -------------------------------------------------------------------
+# Alpaca client + constants
+# -------------------------------------------------------------------
+
+DATA_CLIENT = StockHistoricalDataClient(
+    api_key=ALPACA_API_KEY_ID,
+    secret_key=ALPACA_API_SECRET_KEY,
+)
+
 SYMBOL = "GME"
-
-# how far back to fetch intraday history
-LOOKBACK_DAYS = 3*365
-
-# bar size (in minutes)
-BAR_SIZE_MINUTES = 5
-
-# use IEX feed (since that's what your live code uses)
-DATA_FEED = "iex"
-
-OUTPUT_DIR = Path("data")
-OUTPUT_FILENAME = f"{SYMBOL}_intraday_{BAR_SIZE_MINUTES}m.csv"
-# ----------------------------------
+LOOKBACK_DAYS = 3 * 365  # ~3 years of daily bars
 
 
-def get_intraday_bars_dataframe(
-    symbol: str,
-    lookback_days: int,
-    bar_size_minutes: int,
-    feed: str = "iex",
-) -> pd.DataFrame:
-    """Fetch intraday minute bars for a symbol as a pandas DataFrame."""
-
-    data_client = StockHistoricalDataClient(
-        api_key=ALPACA_API_KEY_ID,
-        secret_key=ALPACA_API_SECRET_KEY,
-    )
-
+def download_gme_daily_history() -> None:
+    """Fetch recent DAILY bars for GME and write them to data/GME_daily.csv."""
     end_timestamp = datetime.now(timezone.utc)
-    start_timestamp = end_timestamp - timedelta(days=lookback_days)
-
-    request = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame(bar_size_minutes, TimeFrameUnit.Minute),
-        start=start_timestamp,
-        end=end_timestamp,
-        feed=feed,
-    )
-
-    bars_response = data_client.get_stock_bars(request)
-
-    if hasattr(bars_response, "df"):
-        bars_dataframe = bars_response.df
-    else:
-        bars_dataframe = pd.DataFrame(bars_response)
-
-    if bars_dataframe.empty:
-        print(f"[download_intraday] No intraday bars returned for {symbol}.")
-        return bars_dataframe
-
-    # If index is MultiIndex (symbol, timestamp), slice by symbol and drop the symbol level.
-    if bars_dataframe.index.nlevels > 1 and "symbol" in bars_dataframe.index.names:
-        bars_dataframe = bars_dataframe.xs(symbol, level="symbol")
-
-    # Ensure sorted by time
-    bars_dataframe = bars_dataframe.sort_index()
-
-    # Make the index a plain column for easier CSV handling
-    bars_dataframe = bars_dataframe.reset_index().rename(columns={"timestamp": "timestamp_utc"})
-
-    return bars_dataframe
-
-
-def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUT_DIR / OUTPUT_FILENAME
+    start_timestamp = end_timestamp - timedelta(days=LOOKBACK_DAYS)
 
     print(
-        f"[download_intraday] Fetching {BAR_SIZE_MINUTES}-minute bars for "
-        f"{SYMBOL} over last {LOOKBACK_DAYS} days (feed={DATA_FEED})..."
+        f"[download_history] Requesting DAILY bars for {SYMBOL} "
+        f"from {start_timestamp.isoformat()} to {end_timestamp.isoformat()} (IEX feed)..."
     )
 
-    bars_dataframe = get_intraday_bars_dataframe(
-        symbol=SYMBOL,
-        lookback_days=LOOKBACK_DAYS,
-        bar_size_minutes=BAR_SIZE_MINUTES,
-        feed=DATA_FEED,
+    request = StockBarsRequest(
+        symbol_or_symbols=SYMBOL,
+        timeframe=TimeFrame(1, TimeFrameUnit.Day),
+        start=start_timestamp,
+        end=end_timestamp,
+        feed="iex",
     )
 
-    if bars_dataframe.empty:
-        print("[download_intraday] No data fetched. Aborting.")
+    bars_response = DATA_CLIENT.get_stock_bars(request)
+
+    # Convert to DataFrame
+    if hasattr(bars_response, "df"):
+        daily_bars_dataframe = bars_response.df
+    else:
+        daily_bars_dataframe = pd.DataFrame(bars_response)
+
+    if daily_bars_dataframe.empty:
+        print(f"[download_history] No daily bars returned for {SYMBOL}.")
         return
 
-    print(f"[download_intraday] Got {len(bars_dataframe)} rows. Writing to {output_path}...")
-    bars_dataframe.to_csv(output_path, index=False)
-    print("[download_intraday] Done.")
+    # If index is MultiIndex (symbol, timestamp), select just this symbol
+    if (
+        isinstance(daily_bars_dataframe.index, pd.MultiIndex)
+        and "symbol" in daily_bars_dataframe.index.names
+    ):
+        daily_bars_dataframe = daily_bars_dataframe.xs(SYMBOL, level="symbol")
+
+    # Sort by timestamp
+    daily_bars_dataframe = daily_bars_dataframe.sort_index()
+
+    # Ensure data directory exists
+    data_directory = os.path.join(PROJECT_ROOT, "data")
+    os.makedirs(data_directory, exist_ok=True)
+
+    output_path = os.path.join(data_directory, f"{SYMBOL}_daily.csv")
+    daily_bars_dataframe.to_csv(output_path)
+
+    print(
+        f"[download_history] Wrote {len(daily_bars_dataframe)} rows "
+        f"to {output_path}"
+    )
 
 
 if __name__ == "__main__":
-    main()
+    download_gme_daily_history()

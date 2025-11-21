@@ -1,67 +1,103 @@
 # tools/download_intraday_history.py
+"""
+Download INTRADAY minute OHLCV history for GME and save it to data/GME_intraday.csv.
 
+Run from the project root, e.g.:
+
+    python tools\download_intraday_history.py
+"""
+
+import os
+import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY
+# -------------------------------------------------------------------
+# Ensure we can import from the project root (config, etc.)
+# -------------------------------------------------------------------
+CURRENT_DIRECTORY = os.path.dirname(__file__)
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIRECTORY, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-SYMBOL = "GME"
-LOOKBACK_DAYS = 3 * 365  # ~3 years
-BAR_SIZE_MINUTES = 5     # 5-minute bars
-FEED = "iex"             # same as you’re using elsewhere
+from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY  # noqa: E402
 
-def main():
-    data_dir = Path("data")
-    data_dir.mkdir(parents=True, exist_ok=True)
+# -------------------------------------------------------------------
+# Alpaca client + constants
+# -------------------------------------------------------------------
 
-    output_path = data_dir / f"{SYMBOL}_intraday_{BAR_SIZE_MINUTES}min.csv"
+DATA_CLIENT = StockHistoricalDataClient(
+    api_key=ALPACA_API_KEY_ID,
+    secret_key=ALPACA_API_SECRET_KEY,
+)
 
-    print(f"[download_intraday] Downloading {SYMBOL} {BAR_SIZE_MINUTES}min bars "
-          f"for last {LOOKBACK_DAYS} days...")
+SYMBOL = "TSLA"
 
-    data_client = StockHistoricalDataClient(
-        api_key=ALPACA_API_KEY_ID,
-        secret_key=ALPACA_API_SECRET_KEY,
+# Be conservative here: 60 calendar days of 1-minute bars is already
+# a decent-sized dataset and usually enough for intraday backtests.
+INTRADAY_LOOKBACK_DAYS = 60
+INTRADAY_BAR_SIZE_MINUTES = 1
+
+
+def download_gme_intraday_history() -> None:
+    """
+    Fetch recent INTRADAY minute bars for GME and write them to data/GME_intraday.csv.
+    """
+    end_timestamp = datetime.now(timezone.utc)
+    start_timestamp = end_timestamp - timedelta(days=INTRADAY_LOOKBACK_DAYS)
+
+    print(
+        f"[download_intraday_history] Requesting {INTRADAY_BAR_SIZE_MINUTES}-minute "
+        f"bars for {SYMBOL} from {start_timestamp.isoformat()} "
+        f"to {end_timestamp.isoformat()} (IEX feed)..."
     )
-
-    end_ts = datetime.now(timezone.utc)
-    start_ts = end_ts - timedelta(days=LOOKBACK_DAYS)
 
     request = StockBarsRequest(
         symbol_or_symbols=SYMBOL,
-        timeframe=TimeFrame(BAR_SIZE_MINUTES, TimeFrameUnit.Minute),
-        start=start_ts,
-        end=end_ts,
-        feed=FEED,
+        timeframe=TimeFrame(INTRADAY_BAR_SIZE_MINUTES, TimeFrameUnit.Minute),
+        start=start_timestamp,
+        end=end_timestamp,
+        feed="iex",
     )
 
-    bars = data_client.get_stock_bars(request)
+    bars_response = DATA_CLIENT.get_stock_bars(request)
 
-    if hasattr(bars, "df"):
-        df = bars.df
+    # Convert to DataFrame
+    if hasattr(bars_response, "df"):
+        intraday_bars_dataframe = bars_response.df
     else:
-        df = pd.DataFrame(bars)
+        intraday_bars_dataframe = pd.DataFrame(bars_response)
 
-    if df.empty:
-        print("[download_intraday] No intraday data returned.")
+    if intraday_bars_dataframe.empty:
+        print(f"[download_intraday_history] No intraday bars returned for {SYMBOL}.")
         return
 
-    # If multi-index (symbol, timestamp), slice to our symbol and flatten
-    if df.index.nlevels > 1 and "symbol" in df.index.names:
-        df = df.xs(SYMBOL, level="symbol")
+    # If index is MultiIndex (symbol, timestamp), select just this symbol
+    if (
+        isinstance(intraday_bars_dataframe.index, pd.MultiIndex)
+        and "symbol" in intraday_bars_dataframe.index.names
+    ):
+        intraday_bars_dataframe = intraday_bars_dataframe.xs(SYMBOL, level="symbol")
 
-    df = df.sort_index()
-    df = df.reset_index()
-    df.rename(columns={"timestamp": "timestamp"}, inplace=True)
+    # Sort by timestamp
+    intraday_bars_dataframe = intraday_bars_dataframe.sort_index()
 
-    print(f"[download_intraday] Got {len(df)} intraday rows. Writing to {output_path}")
-    df.to_csv(output_path, index=False)
-    print("[download_intraday] Done.")
+    # Ensure data directory exists
+    data_directory = os.path.join(PROJECT_ROOT, "data")
+    os.makedirs(data_directory, exist_ok=True)
+
+    output_path = os.path.join(data_directory, f"{SYMBOL}_intraday.csv")
+    intraday_bars_dataframe.to_csv(output_path)
+
+    print(
+        f"[download_intraday_history] Wrote {len(intraday_bars_dataframe)} rows "
+        f"to {output_path}"
+    )
+
 
 if __name__ == "__main__":
-    main()
+    download_gme_intraday_history()

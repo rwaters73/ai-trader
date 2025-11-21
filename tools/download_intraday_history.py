@@ -10,7 +10,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY
 
-SYMBOL = "TSLA"
+SYMBOL = "GME"
 LOOKBACK_DAYS = 3 * 365  # ~3 years
 BAR_SIZE_MINUTES = 5     # 5-minute bars
 FEED = "iex"             # same as you’re using elsewhere

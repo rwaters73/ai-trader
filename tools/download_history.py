@@ -22,10 +22,10 @@ from config import ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY
 
 
 # ------------- CONFIG -------------
-SYMBOL = "TSLA"
+SYMBOL = "GME"
 
 # how far back to fetch intraday history
-LOOKBACK_DAYS = 30
+LOOKBACK_DAYS = 3*365
 
 # bar size (in minutes)
 BAR_SIZE_MINUTES = 5

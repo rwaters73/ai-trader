@@ -16,6 +16,7 @@ from config import (
     BUY_QTY_BY_SYMBOL,
     DEFAULT_BUY_QTY,
 )
+<<<<<<< HEAD
 
 from signals import (
     compute_recent_high_breakout_signal,
@@ -27,6 +28,15 @@ from signals import (
 # Configuration – change this symbol to backtest a different ticker
 # ------------------------------------------------------------------
 
+=======
+
+from signals import compute_recent_high_breakout_signal, EntrySignal
+
+# ------------------------------------------------------------------
+# Configuration – change this symbol to backtest a different ticker
+# ------------------------------------------------------------------
+
+>>>>>>> 89d1afc2c7500da5920db06e59fe0110ea65359e
 SYMBOL_TO_TEST = "GME"
 DAILY_CSV_PATH_TEMPLATE = "data/{symbol}_daily.csv"
 
@@ -34,12 +44,15 @@ STARTING_CASH_DEFAULT = 100000.0
 MAX_HOLDING_DAYS = 30  # simple safety cap on how long we hold a position
 
 
+<<<<<<< HEAD
 # Which entry signal function to use: "breakout" or "sma_trend"
 ENTRY_SIGNAL_MODE = "breakout"
 # To try the SMA trend strategy instead, change this to:
 # ENTRY_SIGNAL_MODE = "sma_trend"
 
 
+=======
+>>>>>>> 89d1afc2c7500da5920db06e59fe0110ea65359e
 # ------------------------------------------------------------------
 # Data structures
 # ------------------------------------------------------------------

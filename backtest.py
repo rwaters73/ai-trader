@@ -16,7 +16,6 @@ from config import (
     BUY_QTY_BY_SYMBOL,
     DEFAULT_BUY_QTY,
 )
-<<<<<<< HEAD
 
 from signals import (
     compute_recent_high_breakout_signal,
@@ -28,31 +27,18 @@ from signals import (
 # Configuration – change this symbol to backtest a different ticker
 # ------------------------------------------------------------------
 
-=======
-
-from signals import compute_recent_high_breakout_signal, EntrySignal
-
-# ------------------------------------------------------------------
-# Configuration – change this symbol to backtest a different ticker
-# ------------------------------------------------------------------
-
->>>>>>> 89d1afc2c7500da5920db06e59fe0110ea65359e
 SYMBOL_TO_TEST = "GME"
 DAILY_CSV_PATH_TEMPLATE = "data/{symbol}_daily.csv"
 
 STARTING_CASH_DEFAULT = 100000.0
 MAX_HOLDING_DAYS = 30  # simple safety cap on how long we hold a position
 
-
-<<<<<<< HEAD
 # Which entry signal function to use: "breakout" or "sma_trend"
 ENTRY_SIGNAL_MODE = "breakout"
 # To try the SMA trend strategy instead, change this to:
 # ENTRY_SIGNAL_MODE = "sma_trend"
 
 
-=======
->>>>>>> 89d1afc2c7500da5920db06e59fe0110ea65359e
 # ------------------------------------------------------------------
 # Data structures
 # ------------------------------------------------------------------
@@ -95,7 +81,9 @@ def load_daily_bars_from_csv(csv_path: str) -> pd.DataFrame:
         utc=True,
     )
 
-    daily_bars_dataframe = daily_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
+    daily_bars_dataframe = (
+        daily_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
+    )
     return daily_bars_dataframe
 
 
@@ -122,11 +110,19 @@ def compute_entry_signal_for_index(
 ) -> Optional[EntrySignal]:
     """
     For a given bar index, slice the daily bars up to *and including* that bar,
-    and run the same daily breakout logic you use in live trading.
+    and run the chosen daily entry logic (breakout or SMA trend).
     """
     bars_up_to_now = daily_bars_dataframe.iloc[: current_index + 1]
-    entry_signal = compute_recent_high_breakout_signal(bars_up_to_now)
-    return entry_signal
+
+    if bars_up_to_now.empty:
+        return None
+
+    if ENTRY_SIGNAL_MODE == "breakout":
+        return compute_recent_high_breakout_signal(bars_up_to_now)
+    elif ENTRY_SIGNAL_MODE == "sma_trend":
+        return compute_sma_trend_entry_signal(bars_up_to_now, symbol)
+    else:
+        raise ValueError(f"Unknown ENTRY_SIGNAL_MODE: {ENTRY_SIGNAL_MODE}")
 
 
 def simulate_backtest_for_symbol_daily(
@@ -137,7 +133,9 @@ def simulate_backtest_for_symbol_daily(
     """
     Daily-only backtest:
 
-      - Uses the same daily breakout signal as live code (compute_recent_high_breakout_signal).
+      - Uses the chosen daily entry signal:
+          * compute_recent_high_breakout_signal  (ENTRY_SIGNAL_MODE = 'breakout')
+          * compute_sma_trend_entry_signal       (ENTRY_SIGNAL_MODE = 'sma_trend')
       - Buys a fixed quantity from BUY_QTY_BY_SYMBOL / DEFAULT_BUY_QTY when signal is present.
       - Enters at NEXT DAY'S OPEN after the signal bar.
       - Exits via TP or SL based on per-symbol percentages.
@@ -169,7 +167,7 @@ def simulate_backtest_for_symbol_daily(
         current_timestamp: pd.Timestamp = current_bar_row["timestamp"]
 
         # ------------------------------------------------------
-        # If we are flat: look for a daily breakout entry signal
+        # If we are flat: look for a daily entry signal
         # ------------------------------------------------------
         if current_position_quantity == 0.0:
             entry_signal = compute_entry_signal_for_index(
@@ -233,8 +231,14 @@ def simulate_backtest_for_symbol_daily(
                 gross_proceeds = current_position_quantity * exit_price
                 cash_balance += gross_proceeds
 
-                pnl_dollars = (exit_price - current_entry_price) * current_position_quantity
-                pnl_percent = (exit_price - current_entry_price) / current_entry_price * 100.0
+                pnl_dollars = (
+                    (exit_price - current_entry_price) * current_position_quantity
+                )
+                pnl_percent = (
+                    (exit_price - current_entry_price)
+                    / current_entry_price
+                    * 100.0
+                )
                 holding_days = (current_timestamp - current_entry_date).days
 
                 executed_trades.append(
@@ -274,8 +278,14 @@ def simulate_backtest_for_symbol_daily(
         gross_proceeds = current_position_quantity * final_close_price
         cash_balance += gross_proceeds
 
-        pnl_dollars = (final_close_price - current_entry_price) * current_position_quantity
-        pnl_percent = (final_close_price - current_entry_price) / current_entry_price * 100.0
+        pnl_dollars = (
+            (final_close_price - current_entry_price) * current_position_quantity
+        )
+        pnl_percent = (
+            (final_close_price - current_entry_price)
+            / current_entry_price
+            * 100.0
+        )
         holding_days = (final_timestamp - current_entry_date).days
 
         executed_trades.append(

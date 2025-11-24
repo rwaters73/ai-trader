@@ -23,18 +23,27 @@ from signals import (
     EntrySignal,
 )
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--symbol", type=str, default="TSLA")
+parser.add_argument("--signal", type=str, default="breakout") #breakout or sma_trend
+args = parser.parse_args()
+
+
 # ------------------------------------------------------------------
 # Configuration – change this symbol to backtest a different ticker
 # ------------------------------------------------------------------
-
-SYMBOL_TO_TEST = "GME"
+SYMBOL_TO_TEST = args.symbol
+#SYMBOL_TO_TEST = "MNDR"
 DAILY_CSV_PATH_TEMPLATE = "data/{symbol}_daily.csv"
 
 STARTING_CASH_DEFAULT = 100000.0
 MAX_HOLDING_DAYS = 30  # simple safety cap on how long we hold a position
 
 # Which entry signal function to use: "breakout" or "sma_trend"
-ENTRY_SIGNAL_MODE = "breakout"
+ENTRY_SIGNAL_MODE = args.signal
+#ENTRY_SIGNAL_MODE = "breakout"
 # To try the SMA trend strategy instead, change this to:
 # ENTRY_SIGNAL_MODE = "sma_trend"
 
@@ -120,7 +129,7 @@ def compute_entry_signal_for_index(
     if ENTRY_SIGNAL_MODE == "breakout":
         return compute_recent_high_breakout_signal(bars_up_to_now)
     elif ENTRY_SIGNAL_MODE == "sma_trend":
-        return compute_sma_trend_entry_signal(bars_up_to_now, symbol)
+        return compute_sma_trend_entry_signal(bars_up_to_now)
     else:
         raise ValueError(f"Unknown ENTRY_SIGNAL_MODE: {ENTRY_SIGNAL_MODE}")
 

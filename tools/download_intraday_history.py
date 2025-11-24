@@ -16,6 +16,13 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--symbol", default="TSLA")
+args = parser.parse_args()
+
+
 # -------------------------------------------------------------------
 # Ensure we can import from the project root (config, etc.)
 # -------------------------------------------------------------------
@@ -35,7 +42,9 @@ DATA_CLIENT = StockHistoricalDataClient(
     secret_key=ALPACA_API_SECRET_KEY,
 )
 
-SYMBOL = "TSLA"
+SYMBOL = args.symbol
+#SYMBOL = "MNDR"
+
 
 # Be conservative here: 60 calendar days of 1-minute bars is already
 # a decent-sized dataset and usually enough for intraday backtests.
@@ -43,7 +52,7 @@ INTRADAY_LOOKBACK_DAYS = 60
 INTRADAY_BAR_SIZE_MINUTES = 1
 
 
-def download_gme_intraday_history() -> None:
+def download_stock_intraday_history() -> None:
     """
     Fetch recent INTRADAY minute bars for GME and write them to data/GME_intraday.csv.
     """
@@ -100,4 +109,4 @@ def download_gme_intraday_history() -> None:
 
 
 if __name__ == "__main__":
-    download_gme_intraday_history()
+    download_stock_intraday_history()

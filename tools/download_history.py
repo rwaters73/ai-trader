@@ -16,6 +16,12 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--symbol", default="TSLA")
+args = parser.parse_args()
+
 # -------------------------------------------------------------------
 # Ensure we can import from the project root (config, etc.)
 # -------------------------------------------------------------------
@@ -35,7 +41,8 @@ DATA_CLIENT = StockHistoricalDataClient(
     secret_key=ALPACA_API_SECRET_KEY,
 )
 
-SYMBOL = "GME"
+SYMBOL = args.symbol
+#SYMBOL = "MNDR"
 LOOKBACK_DAYS = 3 * 365  # ~3 years of daily bars
 
 

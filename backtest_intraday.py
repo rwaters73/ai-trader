@@ -20,11 +20,19 @@ from config import (
 
 from signals import compute_recent_high_breakout_signal, EntrySignal
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--symbol", default="TSLA")
+args = parser.parse_args()
+
+
 # ------------------------------------------------------------------
 # Configuration – change this symbol to backtest a different ticker
 # ------------------------------------------------------------------
 
-SYMBOL_TO_TEST = "GME"
+SYMBOL_TO_TEST = args.symbol
+#SYMBOL_TO_TEST = "MNDR"
 DAILY_CSV_PATH_TEMPLATE = "data/{symbol}_daily.csv"
 INTRADAY_CSV_PATH_TEMPLATE = "data/{symbol}_intraday.csv"
 

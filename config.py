@@ -18,6 +18,10 @@ SYMBOLS = ["AAPL", "TSLA", "BRK.B", "GME", "JNJ", "T", "AMZN", "BRCC"]
 ITERATIONS = 5000          # how many cycles to run before exiting
 INTERVAL_SECONDS = 1    # seconds between cycles
 
+# Risk-based sizing
+RISK_PERCENT_PER_TRADE = 0.01     # risk 1% of account per trade
+MIN_POSITION_DOLLARS = 100        # prevent tiny positions
+
 # Per-symbol entry thresholds (max price at which we are willing to ENTER)
 # You can adjust these per symbol as you see fit.
 MAX_ENTRY_PRICE_BY_SYMBOL = {

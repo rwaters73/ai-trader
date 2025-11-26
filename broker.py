@@ -20,7 +20,7 @@ except ImportError:
 from logger import log_order  # CSV order log (still available if we want it)
 from data import get_latest_quote
 from models import SymbolState, TargetPosition
-from db import log_order_to_db, log_order_event_to_db
+from db import log_order_to_db, log_order_event_to_db, log_risk_event_to_db
 from config import (
     ALPACA_API_KEY_ID,
     ALPACA_API_SECRET_KEY,
@@ -29,6 +29,8 @@ from config import (
     BRACKET_SL_PERCENT_BY_SYMBOL,
     DEFAULT_BRACKET_SL_PERCENT,
 )
+
+from risk_limits import build_risk_context, can_open_new_position
 
 # One shared trading client for the process
 _trading_client = TradingClient(
@@ -274,29 +276,109 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
     to move from current position_qty to target_qty.
 
     Behavior:
-      - If no change in position is needed → do nothing.
+      - If no change in position is needed -> do nothing.
       - If moving from flat -> non-flat and target.entry_type == "limit"
-        and target.entry_limit_price is provided → submit a LIMIT order.
-      - Otherwise → submit a MARKET order.
+        and target.entry_limit_price is provided -> submit a LIMIT order.
+      - Otherwise -> submit a MARKET order.
       - Exits (reducing position) are currently always MARKET.
-    """
-    current_position_quantity = state.position_qty
-    target_position_quantity = target.target_qty
-    delta_quantity = target_position_quantity - current_position_quantity
 
-    print(f"{state.symbol}: current={current_position_quantity}, target={target_position_quantity} | {target.reason}")
+    New: risk_limits integration
+      - For BUY orders that increase net long exposure, check risk_limits
+        before submitting the order. If the order would violate the
+        risk-limited account rules, we log a message and skip the order.
+    """
+    current_quantity = state.position_qty
+    desired_quantity = target.target_qty
+    quantity_delta = desired_quantity - current_quantity
+
+    print(f"{state.symbol}: current={current_quantity}, target={desired_quantity} | {target.reason}")
 
     # No change needed
-    if abs(delta_quantity) < 1e-6:
+    if abs(quantity_delta) < 1e-6:
         print(f"{state.symbol}: No change in position. No order placed.")
         return
 
-    order_side = OrderSide.BUY if delta_quantity > 0 else OrderSide.SELL
-    order_quantity = abs(delta_quantity)
+    order_side = OrderSide.BUY if quantity_delta > 0 else OrderSide.SELL
+    order_quantity = abs(quantity_delta)
 
-    # Determine if this is an ENTRY (flat -> non-flat) or an ADJUST/EXIT
-    is_entry_from_flat = (abs(current_position_quantity) < 1e-6) and (target_position_quantity > 0)
+    # Determine if this is an ENTRY (flat -> non-flat)
+    is_entry_from_flat = (abs(current_quantity) < 1e-6) and (desired_quantity > 0)
 
+    # ------------------------------------------------------------------
+    # Risk check for new BUY exposure
+    # ------------------------------------------------------------------
+    is_new_long_exposure = is_entry_from_flat and (order_side is OrderSide.BUY)
+
+    if is_new_long_exposure:
+        # Estimate the entry price so we can estimate order cost.
+        # For a limit entry, use the proposed limit price.
+        # For a market entry, use the current ask, or bid as a fallback.
+        if target.entry_type.lower() == "limit" and target.entry_limit_price is not None:
+            estimated_price = float(target.entry_limit_price)
+        else:
+            if state.ask is not None and state.ask > 0:
+                estimated_price = float(state.ask)
+            elif state.bid is not None and state.bid > 0:
+                estimated_price = float(state.bid)
+            else:
+                estimated_price = 0.0
+
+        if estimated_price <= 0:
+            print(
+                f"[RISK] {state.symbol}: Could not estimate a positive entry price "
+                f"for risk check. Skipping risk_limits check and not placing order."
+            )
+            return
+
+        estimated_order_cost = order_quantity * estimated_price
+
+        # Build risk context and ask whether we are allowed to open this position.
+        risk_context = build_risk_context(_trading_client)
+        risk_decision = can_open_new_position(risk_context, estimated_order_cost)
+
+        # risk_decision might be a bool or (bool, message)
+        if isinstance(risk_decision, tuple):
+            is_allowed = bool(risk_decision[0])
+            risk_message = str(risk_decision[1]) if len(risk_decision) > 1 else ""
+        else:
+            is_allowed = bool(risk_decision)
+            risk_message = ""
+
+        if not is_allowed:
+            detail = f" Reason: {risk_message}" if risk_message else ""
+            print(
+                f"[RISK] {state.symbol}: Blocked new BUY of approx cost "
+                f"{estimated_order_cost:.2f} by risk_limits.{detail}"
+            )
+
+            # NEW: Log blocked decision
+            log_risk_event_to_db(
+                symbol=state.symbol,
+                action="BLOCK_BUY",
+                cost=estimated_order_cost,
+                allowed=False,
+                message=risk_message
+            )
+
+            return
+        
+        print(
+            f"[RISK] {state.symbol}: New BUY of approx cost {estimated_order_cost:.2f} "
+            f"approved by risk_limits."
+        )
+        # NEW: Log approval
+        log_risk_event_to_db(
+            symbol=state.symbol,
+            action="ALLOW_BUY",
+            cost=estimated_order_cost,
+            allowed=True,
+            message=risk_message
+        )
+
+
+    # ------------------------------------------------------------------
+    # Submit the actual order
+    # ------------------------------------------------------------------
     if (
         is_entry_from_flat
         and target.entry_type.lower() == "limit"
@@ -315,10 +397,7 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
         )
     else:
         # For exits, adjustments, or entries without a valid limit price, use MARKET
-        print(
-            f"{state.symbol}: Submitting MARKET {order_side.name} "
-            f"quantity={order_quantity} to reach target."
-        )
+        print(f"{state.symbol}: Submitting MARKET {order_side.name} quantity={order_quantity} to reach target.")
         order = submit_market_order(
             symbol=state.symbol,
             quantity=order_quantity,

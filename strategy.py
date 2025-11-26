@@ -45,6 +45,24 @@ def _get_buy_quantity_for_symbol(symbol: str) -> float:
     """
     return BUY_QTY_BY_SYMBOL.get(symbol, DEFAULT_BUY_QTY)
 
+def compute_risk_based_position_size(
+    entry_price: float,
+    stop_loss_price: float,
+    account_size: float,
+    risk_percent: float
+) -> float:
+    """
+    Calculate the number of shares to buy based on risk per trade.
+    """
+    risk_dollars = account_size * risk_percent
+    stop_distance = entry_price - stop_loss_price
+
+    if stop_distance <= 0:
+        return 0.0
+
+    raw_quantity = risk_dollars / stop_distance
+    return max(raw_quantity, 0.0)
+
 
 # ---------------------------------------------------------------------------
 # Entry logic: DAILY breakout + INTRADAY confirmation
@@ -151,7 +169,17 @@ def _decide_entry_from_daily_and_intraday(state: SymbolState) -> TargetPosition:
     # Here is where we tell the broker layer to use a LIMIT entry.
     # ----------------------------------------------------
     # Intraday confirmation passed: we are willing to enter.
-    buy_quantity = _get_buy_quantity_for_symbol(symbol)
+    from config import RISK_PERCENT_PER_TRADE
+
+    stop_loss_price = daily_entry_signal.limit_price * (1 - MAX_INTRADAY_PULLBACK_PCT/100)
+    account_size = 100000.0  # later: replace with real fetched account value
+
+    buy_quantity = compute_risk_based_position_size(
+        entry_price=daily_entry_signal.limit_price,
+        stop_loss_price=stop_loss_price,
+        account_size=account_size,
+        risk_percent=RISK_PERCENT_PER_TRADE
+    )
 
     # Express this as a LIMIT entry so the broker layer can place a limit order
     # at the breakout-derived price.

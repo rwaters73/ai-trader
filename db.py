@@ -2,7 +2,12 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
-DB_FILE = "trading_log.db"
+from pathlib import Path
+
+# Central location of the SQLite DB file
+DB_PATH = Path("data/trading_log.db")
+
+#DB_FILE = "trading_log.db"
 
 
 # ----------- Connection Helper -----------
@@ -12,7 +17,7 @@ def get_connection():
     Returns a SQLite connection.
     SQLite automatically creates the DB file if missing.
     """
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row  # dict-like results
     return conn
 
@@ -140,6 +145,40 @@ def log_order_to_db(order):
         order_type,
         time_in_force,
         status,
+    ))
+
+    conn.commit()
+    conn.close()
+
+def log_risk_event_to_db(symbol: str, action: str, cost: float, allowed: bool, message: str = ""):
+    """
+    Log any risk-limits decision (allowed/blocked) into SQLite.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS risk_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        action TEXT NOT NULL,
+        cost REAL NOT NULL,
+        allowed INTEGER NOT NULL,
+        message TEXT
+    )
+    """)
+
+    cur.execute("""
+    INSERT INTO risk_events (timestamp, symbol, action, cost, allowed, message)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        datetime.now().isoformat(timespec="seconds"),
+        symbol,
+        action,
+        float(cost),
+        1 if allowed else 0,
+        message,
     ))
 
     conn.commit()

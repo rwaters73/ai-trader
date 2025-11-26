@@ -78,6 +78,32 @@ def init_db():
         );
     """)
 
+    # Risk snapshots: one row per risk evaluation
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS risk_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            raw_cash REAL NOT NULL,
+            raw_equity REAL NOT NULL,
+            raw_buying_power REAL NOT NULL,
+            effective_starting_capital REAL NOT NULL,
+            minimum_cash_reserve REAL NOT NULL,
+            effective_cash_available REAL NOT NULL
+        );
+    """)
+
+    # Risk rejections: whenever a proposed trade is blocked by risk rules
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS risk_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            proposed_cost REAL NOT NULL,
+            reason TEXT NOT NULL
+        );
+    """)
+
     conn.commit()
     conn.close()
 
@@ -215,3 +241,75 @@ def log_order_event_to_db(
     conn.commit()
     conn.close()
 
+def log_risk_snapshot(risk_context: dict) -> None:
+    """
+    Log a snapshot of the current risk context.
+
+    Expected keys in risk_context:
+      - raw_cash
+      - raw_equity
+      - raw_buying_power
+      - effective_starting_capital
+      - minimum_cash_reserve
+      - effective_cash_available
+    """
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO risk_snapshots (
+                timestamp,
+                raw_cash,
+                raw_equity,
+                raw_buying_power,
+                effective_starting_capital,
+                minimum_cash_reserve,
+                effective_cash_available
+            ) VALUES (?, ?, ?, ?, ?, ?, ?);
+            """,
+            (
+                timestamp,
+                float(risk_context.get("raw_cash", 0.0)),
+                float(risk_context.get("raw_equity", 0.0)),
+                float(risk_context.get("raw_buying_power", 0.0)),
+                float(risk_context.get("effective_starting_capital", 0.0)),
+                float(risk_context.get("minimum_cash_reserve", 0.0)),
+                float(risk_context.get("effective_cash_available", 0.0)),
+            ),
+        )
+        conn.commit()
+
+def log_risk_rejection(
+    symbol: str,
+    side: str,
+    proposed_cost: float,
+    reason: str,
+) -> None:
+    """
+    Log a single rejected trade due to risk limits.
+    """
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO risk_rejections (
+                timestamp,
+                symbol,
+                side,
+                proposed_cost,
+                reason
+            ) VALUES (?, ?, ?, ?, ?);
+            """,
+            (
+                timestamp,
+                symbol,
+                side,
+                float(proposed_cost),
+                reason,
+            ),
+        )
+        conn.commit()

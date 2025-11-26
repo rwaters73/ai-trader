@@ -1,0 +1,70 @@
+Loading all tradable symbols from Alpaca...
+Total tradable US equity symbols: 12236
+
+[Phase 1] Coarse filtering 12236 symbols for price in [2.0, 20.0] and today's volume >= 50,000...
+[Phase 1] Processed 200/12236 symbols. Current candidates: 18
+[Phase 1] Processed 400/12236 symbols. Current candidates: 28
+[Phase 1] Processed 600/12236 symbols. Current candidates: 42
+[Phase 1] Processed 800/12236 symbols. Current candidates: 58
+[Phase 1] Processed 1000/12236 symbols. Current candidates: 63
+[Phase 1] Processed 1200/12236 symbols. Current candidates: 74
+[Phase 1] Processed 1400/12236 symbols. Current candidates: 85
+[Phase 1] Processed 1600/12236 symbols. Current candidates: 91
+[Phase 1] Processed 1800/12236 symbols. Current candidates: 102
+[Phase 1] Processed 2000/12236 symbols. Current candidates: 107
+[Phase 1] Processed 2200/12236 symbols. Current candidates: 116
+[Phase 1] Processed 2400/12236 symbols. Current candidates: 130
+[Phase 1] Processed 2600/12236 symbols. Current candidates: 139
+[Phase 1] Processed 2800/12236 symbols. Current candidates: 151
+[Phase 1] Processed 3000/12236 symbols. Current candidates: 160
+[Phase 1] Processed 3200/12236 symbols. Current candidates: 167
+[Phase 1] Processed 3400/12236 symbols. Current candidates: 173
+[Phase 1] Processed 3600/12236 symbols. Current candidates: 182
+[Phase 1] Processed 3800/12236 symbols. Current candidates: 190
+[Phase 1] Processed 4000/12236 symbols. Current candidates: 195
+[Phase 1] Processed 4200/12236 symbols. Current candidates: 204
+[Phase 1] Processed 4400/12236 symbols. Current candidates: 214
+[Phase 1] Processed 4600/12236 symbols. Current candidates: 223
+[Phase 1] Processed 4800/12236 symbols. Current candidates: 233
+[Phase 1] Processed 5000/12236 symbols. Current candidates: 243
+[Phase 1] Processed 5200/12236 symbols. Current candidates: 253
+[Phase 1] Processed 5400/12236 symbols. Current candidates: 259
+[Phase 1] Processed 5600/12236 symbols. Current candidates: 264
+[Phase 1] Processed 5800/12236 symbols. Current candidates: 272
+[Phase 1] Processed 6000/12236 symbols. Current candidates: 283
+[Phase 1] Processed 6200/12236 symbols. Current candidates: 288
+[Phase 1] Processed 6400/12236 symbols. Current candidates: 299
+[Phase 1] Processed 6600/12236 symbols. Current candidates: 303
+[Phase 1] Processed 6800/12236 symbols. Current candidates: 313
+[Phase 1] Processed 7000/12236 symbols. Current candidates: 318
+[Phase 1] Processed 7200/12236 symbols. Current candidates: 328
+[Phase 1] Processed 7400/12236 symbols. Current candidates: 338
+[Phase 1] Processed 7600/12236 symbols. Current candidates: 346
+[Phase 1] Processed 7800/12236 symbols. Current candidates: 361
+[Phase 1] Processed 8000/12236 symbols. Current candidates: 373
+[Phase 1] Processed 8200/12236 symbols. Current candidates: 386
+[Phase 1] Processed 8400/12236 symbols. Current candidates: 399
+[Phase 1] Processed 8600/12236 symbols. Current candidates: 410
+[Phase 1] Processed 8800/12236 symbols. Current candidates: 423
+[Phase 1] Processed 9000/12236 symbols. Current candidates: 428
+[Phase 1] Processed 9200/12236 symbols. Current candidates: 438
+[Phase 1] Processed 9400/12236 symbols. Current candidates: 448
+[Phase 1] Processed 9600/12236 symbols. Current candidates: 461
+[Phase 1] Processed 9800/12236 symbols. Current candidates: 471
+[Phase 1] Processed 10000/12236 symbols. Current candidates: 478
+[Phase 1] Processed 10200/12236 symbols. Current candidates: 488
+[Phase 1] Processed 10400/12236 symbols. Current candidates: 498
+[Phase 1] Processed 10600/12236 symbols. Current candidates: 509
+[Phase 1] Processed 10800/12236 symbols. Current candidates: 519
+[Phase 1] Processed 11000/12236 symbols. Current candidates: 532
+[Phase 1] Processed 11200/12236 symbols. Current candidates: 548
+[Phase 1] Processed 11400/12236 symbols. Current candidates: 559
+[Phase 1] Processed 11600/12236 symbols. Current candidates: 569
+[Phase 1] Processed 11800/12236 symbols. Current candidates: 575
+[Phase 1] Processed 12000/12236 symbols. Current candidates: 587
+[Phase 1] Processed 12200/12236 symbols. Current candidates: 594
+[Phase 1] Processed 12236/12236 symbols. Current candidates: 595
+[Phase 1] Finished. 595 symbols passed coarse filters.
+
+[Phase 2] Evaluating 595 candidate symbols with lookback_days=20...
+

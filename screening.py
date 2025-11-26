@@ -4,16 +4,14 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 
 import os
-from datetime import timedelta
+import sys
+import subprocess
 
 import pandas as pd
-
 from dotenv import load_dotenv
 
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import (
-    StockBarsRequest,
-)
+from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.data.enums import DataFeed
 
@@ -48,13 +46,11 @@ def _load_api_keys() -> tuple[str, str]:
 
 def get_stock_client() -> StockHistoricalDataClient:
     api_key, secret_key = _load_api_keys()
-    # Historical client (IEX feed is set per-request)
     return StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
 
 
 def get_trading_client() -> TradingClient:
     api_key, secret_key = _load_api_keys()
-    # Paper trading; adjust if you ever want live
     return TradingClient(api_key, secret_key, paper=True)
 
 
@@ -108,7 +104,6 @@ def fetch_recent_daily_bars(
         client = get_stock_client()
 
     end_ts = pd.Timestamp.now(tz="America/New_York")
-    # Add a few extra days of padding
     start_ts = end_ts - pd.Timedelta(days=lookback_days + 5)
 
     request = StockBarsRequest(
@@ -125,7 +120,6 @@ def fetch_recent_daily_bars(
 
     df = bars.df
 
-    # MultiIndex (symbol, timestamp) -> slice to just this symbol
     if isinstance(df.index, pd.MultiIndex):
         try:
             df = df.xs(symbol, level=0)
@@ -193,34 +187,23 @@ def evaluate_symbol_against_pillars(
 ) -> PillarCheckResult:
     """
     Core Ross 5 pillars check.
-
-    1. Price must be between $2 and $20
-    2. Rate of Change Today - it should be up at least 10% already
-    3. Relative Volume - need to have 5x relative volume
-    4. It should have compelling news (stubbed/simplified)
-    5. Float must be under 20M shares (stubbed unless data is provided)
     """
 
-    # 1) Price filter
     price_ok = 2.0 <= latest_price <= 20.0
 
-    # 2) Rate of change today vs previous close
     roc = 0.0
     if prev_close > 0:
         roc = (latest_price - prev_close) / prev_close
     roc_ok = roc >= 0.10
 
-    # 3) Relative volume vs average daily volume
     rvol = compute_relative_volume(today_volume, recent_daily_volumes)
     rvol_ok = rvol >= 5.0
 
-    # 4) News filter – stubbed for now
     if require_news:
         news_ok = bool(news_items)
     else:
         news_ok = True
 
-    # 5) Float filter – stubbed for now
     if require_float:
         float_ok = float_shares is not None and float_shares < 20_000_000
     else:
@@ -262,9 +245,6 @@ def evaluate_symbol_with_recent_data(
 ) -> Optional[PillarCheckResult]:
     """
     Fetch recent daily bars for a symbol and run Ross's pillars on it.
-
-    NOTE: This uses daily bars and assumes you run it after the close,
-    so "today's" change and volume are based on the last daily bar.
     """
     if client is None:
         client = get_stock_client()
@@ -286,12 +266,10 @@ def evaluate_symbol_with_recent_data(
     prev_close = float(prev_bar["close"])
     today_volume = float(latest_bar["volume"])
 
-    # Use previous N days (excluding today) for average volume
-    recent_hist = df.iloc[:-1]  # drop today's bar
+    recent_hist = df.iloc[:-1]
     recent_hist = recent_hist.tail(lookback_days)
     recent_volumes = [float(v) for v in recent_hist["volume"].tolist()]
 
-    # TODO: plug in real news + float data here.
     news_items: List[str] = []
     float_shares: Optional[float] = None
 
@@ -309,7 +287,7 @@ def evaluate_symbol_with_recent_data(
 
 
 # ---------------------------------------------------------------------------
-# Phase 1: snapshots for MANY symbols (cheap filter)
+# Phase 1: coarse filter using batched daily bars
 # ---------------------------------------------------------------------------
 
 def phase1_filter_candidates(
@@ -321,25 +299,23 @@ def phase1_filter_candidates(
     batch_size: int = 200,
 ) -> List[str]:
     """
-    Phase 1: Use *daily bars in batches* to cheaply filter the universe by:
+    Phase 1: Use daily bars in batches to cheaply filter the universe by:
 
     - price in [min_price, max_price]
     - today's volume >= min_today_volume
-
-    This avoids snapshot quirks and uses the same bar endpoint we already
-    know works with IEX in your environment.
     """
     if client is None:
         client = get_stock_client()
 
     total = len(all_symbols)
-    print(f"[Phase 1] Coarse filtering {total} symbols "
-          f"for price in [{min_price}, {max_price}] "
-          f"and today's volume >= {min_today_volume:,}...")
+    print(
+        f"[Phase 1] Coarse filtering {total} symbols "
+        f"for price in [{min_price}, {max_price}] "
+        f"and today's volume >= {min_today_volume:,}..."
+    )
 
     candidates: List[str] = []
 
-    # We'll just need recent days to get the *latest* daily bar per symbol.
     end_ts = pd.Timestamp.now(tz="America/New_York")
     start_ts = end_ts - pd.Timedelta(days=5)
 
@@ -368,12 +344,10 @@ def phase1_filter_candidates(
 
         df = bars.df
 
-        # df is usually a MultiIndex (symbol, timestamp) -> we'll loop symbols
         if not isinstance(df.index, pd.MultiIndex):
             print(f"[WARN] Unexpected bar index type for batch starting at {start}")
             continue
 
-        # For each symbol in this batch, pull its latest daily bar
         for sym in batch:
             try:
                 sym_df = df.xs(sym, level=0)
@@ -399,11 +373,148 @@ def phase1_filter_candidates(
 
             candidates.append(sym)
 
-        print(f"[Phase 1] Processed {min(start + batch_size, total)}/{total} symbols. "
-              f"Current candidates: {len(candidates)}")
+        print(
+            f"[Phase 1] Processed {min(start + batch_size, total)}/{total} symbols. "
+            f"Current candidates: {len(candidates)}"
+        )
 
     print(f"[Phase 1] Finished. {len(candidates)} symbols passed coarse filters.\n")
     return candidates
+
+
+# ---------------------------------------------------------------------------
+# Backtest invocation helpers (subprocesses)
+# ---------------------------------------------------------------------------
+
+def ensure_daily_data_for_symbol(symbol: str, auto_download: bool) -> bool:
+    """
+    Ensure data/{symbol}_daily.csv exists.
+
+    If auto_download is True and the file is missing, call
+    tools/download_history.py --symbol SYMBOL to create it.
+
+    Returns True if the file exists after this function, False otherwise.
+    """
+    csv_path = os.path.join("data", f"{symbol}_daily.csv")
+    if os.path.exists(csv_path):
+        return True
+
+    if not auto_download:
+        print(
+            f"[Data] Missing {csv_path}. "
+            f"Run tools/download_history.py --symbol {symbol} "
+            f"(or use --auto-download)."
+        )
+        return False
+
+    print(f"[Data] {csv_path} missing. Auto-downloading DAILY history for {symbol}...")
+    cmd = [sys.executable, "tools/download_history.py", "--symbol", symbol]
+    try:
+        subprocess.run(cmd, check=False)
+    except OSError as e:
+        print(f"[Data] Failed to run download_history.py for {symbol}: {e}")
+        return False
+
+    if os.path.exists(csv_path):
+        print(f"[Data] Downloaded {csv_path}.")
+        return True
+    else:
+        print(
+            f"[Data] After auto-download, {csv_path} still not found. "
+            f"Skipping {symbol}."
+        )
+        return False
+
+
+def ensure_intraday_data_for_symbol(symbol: str, auto_download: bool) -> bool:
+    """
+    Ensure data/{symbol}_intraday.csv exists.
+
+    If auto_download is True and the file is missing, call
+    tools/download_intraday_history.py --symbol SYMBOL to create it.
+
+    Returns True if the file exists after this function, False otherwise.
+    """
+    csv_path = os.path.join("data", f"{symbol}_intraday.csv")
+    if os.path.exists(csv_path):
+        return True
+
+    if not auto_download:
+        print(
+            f"[Data] Missing {csv_path}. "
+            f"Run tools/download_intraday_history.py --symbol {symbol} "
+            f"(or use --auto-download)."
+        )
+        return False
+
+    print(f"[Data] {csv_path} missing. Auto-downloading INTRADAY history for {symbol}...")
+    cmd = [sys.executable, "tools/download_intraday_history.py", "--symbol", symbol]
+    try:
+        subprocess.run(cmd, check=False)
+    except OSError as e:
+        print(f"[Data] Failed to run download_intraday_history.py for {symbol}: {e}")
+        return False
+
+    if os.path.exists(csv_path):
+        print(f"[Data] Downloaded {csv_path}.")
+        return True
+    else:
+        print(
+            f"[Data] After auto-download, {csv_path} still not found. "
+            f"Skipping {symbol}."
+        )
+        return False
+
+
+def run_daily_backtest_for_symbol(
+    symbol: str,
+    signal_mode: Optional[str] = None,
+    auto_download: bool = False,
+) -> None:
+    """
+    Call backtest.py in a subprocess for a single symbol,
+    ensuring daily data exists (and optionally auto-downloading it).
+    """
+    if not ensure_daily_data_for_symbol(symbol, auto_download=auto_download):
+        print(f"[Backtest-Daily] Skipping {symbol}: no daily data.")
+        return
+
+    cmd = [sys.executable, "backtest.py", "--symbol", symbol]
+    if signal_mode:
+        cmd.extend(["--signal", signal_mode])
+
+    print(f"[Backtest-Daily] Running: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=False)
+    except OSError as e:
+        print(f"[Backtest-Daily] Failed to run backtest.py for {symbol}: {e}")
+
+
+def run_intraday_backtest_for_symbol(
+    symbol: str,
+    auto_download: bool = False,
+) -> None:
+    """
+    Call backtest_intraday.py in a subprocess for a single symbol,
+    ensuring both daily and intraday data exist (and optionally auto-downloading).
+    """
+
+    # Intraday backtest needs both DAILY and INTRADAY history
+    if not ensure_daily_data_for_symbol(symbol, auto_download=auto_download):
+        print(f"[Backtest-Intraday] Skipping {symbol}: no daily data.")
+        return
+
+    if not ensure_intraday_data_for_symbol(symbol, auto_download=auto_download):
+        print(f"[Backtest-Intraday] Skipping {symbol}: no intraday data.")
+        return
+
+    cmd = [sys.executable, "backtest_intraday.py", "--symbol", symbol]
+
+    print(f"[Backtest-Intraday] Running: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=False)
+    except OSError as e:
+        print(f"[Backtest-Intraday] Failed to run backtest_intraday.py for {symbol}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +577,31 @@ def main() -> None:
         "--batch-size",
         type=int,
         default=200,
-        help="Number of symbols per snapshot batch in Phase 1 (default: 200)",
+        help="Number of symbols per daily-bar batch in Phase 1 (default: 200)",
+    )
+
+    # Backtest integration flags
+    parser.add_argument(
+        "--backtest-daily",
+        action="store_true",
+        help="After screening, run backtest.py on each passing symbol.",
+    )
+    parser.add_argument(
+        "--backtest-signal",
+        type=str,
+        default=None,
+        help="If provided, passed as --signal to backtest.py "
+             "(e.g. 'breakout' or 'sma_trend').",
+    )
+    parser.add_argument(
+        "--backtest-intraday",
+        action="store_true",
+        help="After screening, run backtest_intraday.py on each passing symbol.",
+    )
+    parser.add_argument(
+        "--auto-download",
+        action="store_true",
+        help="If set, automatically download missing daily/intraday CSVs before backtesting.",
     )
 
     args = parser.parse_args()
@@ -497,9 +632,11 @@ def main() -> None:
             "You must either provide --symbols or use --scan-all to scan all tradable symbols."
         )
 
-    # Phase 2: full Ross-pillar evaluation for candidates only
-    print(f"[Phase 2] Evaluating {len(candidate_symbols)} candidate symbols "
-          f"with lookback_days={args.lookback_days}...\n")
+    # Phase 2
+    print(
+        f"[Phase 2] Evaluating {len(candidate_symbols)} candidate symbols "
+        f"with lookback_days={args.lookback_days}...\n"
+    )
 
     passing: List[PillarCheckResult] = []
 
@@ -517,14 +654,20 @@ def main() -> None:
         status = "✅ PASSES" if result.all_ok else "❌ FAILS"
 
         print(f"{sym}: {status}")
-        print(f"  Price:       ${result.latest_price:.2f}  "
-              f"(prev close: ${result.prev_close:.2f})")
-        print(f"  ROC today:   {result.extra_info['roc_pct']:.2f}%  "
-              f"-> {'OK' if result.roc_ok else 'X'}")
+        print(
+            f"  Price:       ${result.latest_price:.2f}  "
+            f"(prev close: ${result.prev_close:.2f})"
+        )
+        print(
+            f"  ROC today:   {result.extra_info['roc_pct']:.2f}%  "
+            f"-> {'OK' if result.roc_ok else 'X'}"
+        )
         print(f"  Volume:      {result.today_volume:,.0f}")
         print(f"  Avg volume:  {result.avg_daily_volume:,.0f}")
-        print(f"  Rel volume:  {result.relative_volume:.2f}x "
-              f"-> {'OK' if result.rvol_ok else 'X'}")
+        print(
+            f"  Rel volume:  {result.relative_volume:.2f}x "
+            f"-> {'OK' if result.rvol_ok else 'X'}"
+        )
         print(f"  Price OK:    {result.price_ok}")
         print(f"  News OK:     {result.news_ok}  (require_news={args.require_news})")
         print(f"  Float OK:    {result.float_ok} (require_float={args.require_float})")
@@ -537,11 +680,35 @@ def main() -> None:
     if passing:
         print("Symbols passing all pillars:")
         for r in passing:
-            print(f"  - {r.symbol} "
-                  f"(rel vol {r.relative_volume:.2f}x, "
-                  f"ROC {r.extra_info['roc_pct']:.2f}%)")
+            print(
+                f"  - {r.symbol} "
+                f"(rel vol {r.relative_volume:.2f}x, "
+                f"ROC {r.extra_info['roc_pct']:.2f}%)"
+            )
     else:
         print("No symbols passed all pillars with the current settings.")
+
+    # --------------------------------------------------
+    # Optional: run backtests on passing symbols
+    # --------------------------------------------------
+    if passing and (args.backtest_daily or args.backtest_intraday):
+        print("\n[Backtest] Running backtests for passing symbols...")
+
+        for r in passing:
+            sym = r.symbol
+
+            if args.backtest_daily:
+                run_daily_backtest_for_symbol(
+                    symbol=sym,
+                    signal_mode=args.backtest_signal,
+                    auto_download=args.auto_download,
+                )
+
+            if args.backtest_intraday:
+                run_intraday_backtest_for_symbol(
+                    symbol=sym,
+                    auto_download=args.auto_download,
+                )
 
 
 if __name__ == "__main__":

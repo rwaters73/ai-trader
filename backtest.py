@@ -47,6 +47,11 @@ ENTRY_SIGNAL_MODE = args.signal
 # To try the SMA trend strategy instead, change this to:
 # ENTRY_SIGNAL_MODE = "sma_trend"
 
+# How much of account equity to risk per trade (as a fraction, e.g. 0.01 = 1%)
+RISK_FRACTION_PER_TRADE = 0.01
+
+# Optional: cap each position to at most this fraction of equity
+MAX_POSITION_FRACTION_OF_EQUITY = 0.20  # 20% of equity in any one trade
 
 # ------------------------------------------------------------------
 # Data structures
@@ -107,6 +112,50 @@ def get_stop_loss_percent_for_symbol(symbol: str) -> float:
 def get_buy_quantity_for_symbol(symbol: str) -> float:
     return BUY_QTY_BY_SYMBOL.get(symbol, DEFAULT_BUY_QTY)
 
+def compute_risk_based_buy_quantity(
+    entry_price: float,
+    stop_loss_percent: float,
+    current_equity: float,
+) -> int:
+    """
+    Compute how many shares to buy based on:
+      - entry_price
+      - stop_loss_percent (e.g. 2.0 means SL is 2% below entry)
+      - current_equity (cash + any open position value; when flat, this is just cash)
+
+    We risk at most RISK_FRACTION_PER_TRADE * current_equity on the trade,
+    and optionally cap the position size to MAX_POSITION_FRACTION_OF_EQUITY * current_equity.
+    """
+    if entry_price <= 0 or stop_loss_percent <= 0 or current_equity <= 0:
+        return 0
+
+    # Distance from entry to stop in dollars per share
+    stop_loss_price = entry_price * (1.0 - stop_loss_percent / 100.0)
+    risk_per_share = entry_price - stop_loss_price
+    if risk_per_share <= 0:
+        return 0
+
+    # How many dollars of equity we are willing to risk on this trade
+    max_risk_dollars = current_equity * RISK_FRACTION_PER_TRADE
+
+    # Shares limited by risk
+    max_shares_by_risk = max_risk_dollars / risk_per_share
+
+    # Also cap by not putting too much *capital* in one trade
+    max_position_dollars = current_equity * MAX_POSITION_FRACTION_OF_EQUITY
+    max_shares_by_capital = max_position_dollars / entry_price
+
+    # Take the stricter of the two caps
+    raw_shares = min(max_shares_by_risk, max_shares_by_capital)
+
+    # You can only trade whole shares in this backtest
+    shares_to_buy = int(raw_shares)
+
+    # Never return negative
+    if shares_to_buy < 0:
+        return 0
+
+    return shares_to_buy
 
 # ------------------------------------------------------------------
 # Core backtest logic (daily-only)
@@ -186,23 +235,37 @@ def simulate_backtest_for_symbol_daily(
             )
 
             if entry_signal is not None:
-                # Enter at NEXT day open, assuming we have enough cash.
+                # Enter at NEXT day open
                 entry_price = float(next_bar_row["open"])
-                required_cash = buy_quantity * entry_price
 
-                if required_cash <= cash_balance:
-                    current_position_quantity = buy_quantity
-                    current_entry_price = entry_price
-                    current_entry_date = next_bar_row["timestamp"]
+                # When flat, equity is just cash
+                current_equity = cash_balance
 
-                    current_take_profit_price = current_entry_price * (
-                        1.0 + take_profit_percent / 100.0
-                    )
-                    current_stop_loss_price = current_entry_price * (
-                        1.0 - stop_loss_percent / 100.0
-                    )
+                risk_based_quantity = compute_risk_based_buy_quantity(
+                    entry_price=entry_price,
+                    stop_loss_percent=stop_loss_percent,
+                    current_equity=current_equity,
+                )
 
-                    cash_balance -= required_cash
+                if risk_based_quantity <= 0:
+                    # Not enough capital / too tight SL to take this trade
+                    pass
+                else:
+                    required_cash = risk_based_quantity * entry_price
+
+                    if required_cash <= cash_balance:
+                        current_position_quantity = risk_based_quantity
+                        current_entry_price = entry_price
+                        current_entry_date = next_bar_row["timestamp"]
+
+                        current_take_profit_price = current_entry_price * (
+                            1.0 + take_profit_percent / 100.0
+                        )
+                        current_stop_loss_price = current_entry_price * (
+                            1.0 - stop_loss_percent / 100.0
+                        )
+
+                        cash_balance -= required_cash
 
         # ------------------------------------------------------
         # If we are in a position: check exit conditions

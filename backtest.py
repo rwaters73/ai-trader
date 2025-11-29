@@ -17,7 +17,7 @@ from config import (
     DEFAULT_BUY_QTY,
 )
 
-from risk_sizing import compute_risk_limited_buy_quantity
+from risk_sizing import compute_risk_limited_buy_quantity, compute_risk_based_position_size
 
 from signals import (
     compute_recent_high_breakout_signal,

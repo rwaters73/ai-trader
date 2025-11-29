@@ -23,6 +23,13 @@ MAX_RISK_FRACTION_PER_TRADE = 0.01  # 1% of starting cash per trade
 
 from signals import compute_recent_high_breakout_signal, EntrySignal
 
+from risk_limits import (
+    compute_risk_based_position_size,
+    RISK_R_PER_TRADE_DEFAULT,
+)
+
+from risk_sizing import compute_risk_limited_buy_quantity
+
 import argparse
 
 parser = argparse.ArgumentParser()
@@ -233,6 +240,7 @@ def simulate_backtest_for_symbol_with_intraday(
     daily_bars_dataframe: pd.DataFrame,
     intraday_bars_dataframe: pd.DataFrame,
     starting_cash: float = STARTING_CASH_DEFAULT,
+    risk_r_per_trade: float = RISK_R_PER_TRADE_DEFAULT,
 ) -> Tuple[float, List[BacktestTrade]]:
     """
     Backtest with DAILY breakout plus INTRADAY confirmation:

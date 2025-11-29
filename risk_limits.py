@@ -93,3 +93,53 @@ def can_open_new_position(
     # here if you want later.
 
     return True
+
+def compute_risk_based_position_size(
+    symbol: str,
+    entry_price: float,
+    stop_loss_price: float,
+    available_cash: float,
+    r_per_trade: float,
+    starting_cash: float,
+) -> float:
+    """
+    Compute how many shares we can buy based on risk-per-trade (R),
+    available cash, and the distance from entry to stop loss.
+
+    Parameters
+    ----------
+    entry_price : float
+        Proposed entry price.
+    stop_loss_price : float
+        Fixed stop loss price for the trade.
+    available_cash : float
+        Cash available for the backtester or live trading.
+    r_per_trade : float
+        Fraction of starting capital to risk per trade. Example: 0.01 = risk 1% of account.
+    starting_cash : float
+        The 'virtual' account size (e.g., 2000).
+
+    Returns
+    -------
+    int
+        Number of shares we can afford under these constraints.
+    """
+    # Risk (R) = risk_per_trade * starting_cash
+    risk_per_trade_dollars = r_per_trade * starting_cash
+
+    stop_distance = abs(entry_price - stop_loss_price)
+    if stop_distance <= 0:
+        return 0
+
+    # How many shares position size by risk?
+    shares_by_risk = risk_per_trade_dollars / stop_distance
+
+    # How many shares can we buy given available cash?
+    if entry_price <= 0:
+        return 0
+    shares_by_cash = available_cash / entry_price
+
+    # Final position size is the smaller of the two.
+    shares = int(min(shares_by_risk, shares_by_cash))
+
+    return max(shares, 0)

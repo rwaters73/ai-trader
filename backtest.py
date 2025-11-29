@@ -17,6 +17,8 @@ from config import (
     DEFAULT_BUY_QTY,
 )
 
+from risk_sizing import compute_risk_limited_buy_quantity
+
 from signals import (
     compute_recent_high_breakout_signal,
     compute_sma_trend_entry_signal,
@@ -215,7 +217,6 @@ def simulate_backtest_for_symbol_daily(
 
     take_profit_percent = get_take_profit_percent_for_symbol(symbol)
     stop_loss_percent = get_stop_loss_percent_for_symbol(symbol)
-    buy_quantity = get_buy_quantity_for_symbol(symbol)
 
     bar_index = 0
     while bar_index < num_bars - 1:
@@ -234,38 +235,44 @@ def simulate_backtest_for_symbol_daily(
                 current_index=bar_index,
             )
 
-            if entry_signal is not None:
-                # Enter at NEXT day open
-                entry_price = float(next_bar_row["open"])
-
-                # When flat, equity is just cash
-                current_equity = cash_balance
-
-                risk_based_quantity = compute_risk_based_buy_quantity(
-                    entry_price=entry_price,
-                    stop_loss_percent=stop_loss_percent,
-                    current_equity=current_equity,
+            if current_position_quantity == 0.0:
+                entry_signal = compute_entry_signal_for_index(
+                    symbol=symbol,
+                    daily_bars_dataframe=daily_bars_dataframe,
+                    current_index=bar_index,
                 )
 
-                if risk_based_quantity <= 0:
-                    # Not enough capital / too tight SL to take this trade
-                    pass
-                else:
-                    required_cash = risk_based_quantity * entry_price
+                if entry_signal is not None:
+                    # Enter at NEXT day open using risk-limited sizing
+                    entry_price = float(next_bar_row["open"])
 
-                    if required_cash <= cash_balance:
-                        current_position_quantity = risk_based_quantity
-                        current_entry_price = entry_price
-                        current_entry_date = next_bar_row["timestamp"]
+                    buy_quantity = compute_risk_limited_buy_quantity(
+                        symbol=symbol,
+                        entry_price=entry_price,
+                        account_cash=cash_balance,
+                        stop_loss_percent=stop_loss_percent,
+                        # you can also pass overrides for max_risk_percent_per_trade / max_capital_percent_per_trade here if you want
+                    )
 
-                        current_take_profit_price = current_entry_price * (
-                            1.0 + take_profit_percent / 100.0
-                        )
-                        current_stop_loss_price = current_entry_price * (
-                            1.0 - stop_loss_percent / 100.0
-                        )
+                    if buy_quantity <= 0:
+                        # Risk-based sizing says: do not enter this trade
+                        pass
+                    else:
+                        required_cash = buy_quantity * entry_price
 
-                        cash_balance -= required_cash
+                        if required_cash <= cash_balance:
+                            current_position_quantity = buy_quantity
+                            current_entry_price = entry_price
+                            current_entry_date = next_bar_row["timestamp"]
+
+                            current_take_profit_price = current_entry_price * (
+                                1.0 + take_profit_percent / 100.0
+                            )
+                            current_stop_loss_price = current_entry_price * (
+                                1.0 - stop_loss_percent / 100.0
+                            )
+
+                            cash_balance -= required_cash
 
         # ------------------------------------------------------
         # If we are in a position: check exit conditions

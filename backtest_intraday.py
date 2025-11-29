@@ -18,6 +18,9 @@ from config import (
     MIN_INTRADAY_BARS_FOR_CONFIRMATION,
 )
 
+RISK_R_PER_TRADE_DEFAULT = 1.0  # how many "R" per trade
+MAX_RISK_FRACTION_PER_TRADE = 0.01  # 1% of starting cash per trade
+
 from signals import compute_recent_high_breakout_signal, EntrySignal
 
 import argparse
@@ -32,7 +35,6 @@ args = parser.parse_args()
 # ------------------------------------------------------------------
 
 SYMBOL_TO_TEST = args.symbol
-#SYMBOL_TO_TEST = "MNDR"
 DAILY_CSV_PATH_TEMPLATE = "data/{symbol}_daily.csv"
 INTRADAY_CSV_PATH_TEMPLATE = "data/{symbol}_intraday.csv"
 
@@ -76,7 +78,9 @@ def load_daily_bars_from_csv(csv_path: str) -> pd.DataFrame:
         utc=True,
     )
 
-    daily_bars_dataframe = daily_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
+    daily_bars_dataframe = (
+        daily_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
+    )
     return daily_bars_dataframe
 
 
@@ -95,7 +99,9 @@ def load_intraday_bars_from_csv(csv_path: str) -> pd.DataFrame:
         utc=True,
     )
 
-    intraday_bars_dataframe = intraday_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
+    intraday_bars_dataframe = (
+        intraday_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
+    )
     return intraday_bars_dataframe
 
 
@@ -108,7 +114,54 @@ def get_stop_loss_percent_for_symbol(symbol: str) -> float:
 
 
 def get_buy_quantity_for_symbol(symbol: str) -> float:
+    """
+    Look up the per symbol buy quantity, with a fallback default.
+    """
     return BUY_QTY_BY_SYMBOL.get(symbol, DEFAULT_BUY_QTY)
+
+
+# ------------------------------------------------------------------
+# Risk based decisions
+# ------------------------------------------------------------------
+
+def compute_risk_based_position_size(
+    symbol: str,
+    entry_price: float,
+    stop_loss_price: float,
+    available_cash: float,
+    r_per_trade: float,
+    starting_cash: float = STARTING_CASH_DEFAULT,
+) -> float:
+    """
+    Compute position size based on risk per trade:
+      - risk per share = entry_price - stop_loss_price (for longs)
+      - dollar risk allowed = starting_cash * MAX_RISK_FRACTION_PER_TRADE * r_per_trade
+      - shares = min(available_cash / entry_price, dollar_risk_allowed / risk_per_share)
+
+    Returns:
+      - number of shares to buy (float, but you can round if you like)
+    """
+    if entry_price <= 0 or stop_loss_price <= 0:
+        return 0.0
+
+    risk_per_share = entry_price - stop_loss_price
+    if risk_per_share <= 0:
+        # No risk or invalid (stop above entry for a long)
+        return 0.0
+
+    dollar_risk_allowed = starting_cash * MAX_RISK_FRACTION_PER_TRADE * r_per_trade
+
+    # Shares limited both by cash and by risk
+    max_shares_by_cash = available_cash / entry_price
+    max_shares_by_risk = dollar_risk_allowed / risk_per_share
+
+    shares = min(max_shares_by_cash, max_shares_by_risk)
+
+    if shares <= 0:
+        return 0.0
+
+    # Use whole shares
+    return float(int(shares))
 
 
 # ------------------------------------------------------------------
@@ -125,7 +178,7 @@ def intraday_confirmation_for_day(
 
       - Look at all intraday bars for the same calendar date as `daily_timestamp`.
       - Require at least MIN_INTRADAY_BARS_FOR_CONFIRMATION bars.
-      - Use the *last* close of that day as the "current" intraday price.
+      - Use the last close of that day as the "current" intraday price.
       - Confirm that this last intraday close has not pulled back more than
         MAX_INTRADAY_PULLBACK_PCT below the proposed limit price.
     """
@@ -167,6 +220,9 @@ def compute_entry_signal_for_index(
     daily_bars_dataframe: pd.DataFrame,
     current_index: int,
 ) -> Optional[EntrySignal]:
+    """
+    Daily breakout signal used as the base entry condition.
+    """
     bars_up_to_now = daily_bars_dataframe.iloc[: current_index + 1]
     entry_signal = compute_recent_high_breakout_signal(bars_up_to_now)
     return entry_signal
@@ -179,12 +235,12 @@ def simulate_backtest_for_symbol_with_intraday(
     starting_cash: float = STARTING_CASH_DEFAULT,
 ) -> Tuple[float, List[BacktestTrade]]:
     """
-    Backtest with DAILY breakout + INTRADAY confirmation:
+    Backtest with DAILY breakout plus INTRADAY confirmation:
 
-      - Same daily breakout logic as live (compute_recent_high_breakout_signal).
-      - Only enter if intraday_confirmation_for_day() passes.
-      - Entries at NEXT DAY OPEN after the signal day.
-      - Exits via TP/SL + MAX_HOLDING_DAYS/end-of-data.
+      - Uses daily breakout logic (compute_recent_high_breakout_signal).
+      - Only enters if intraday_confirmation_for_day passes.
+      - Entries use the daily bar open for the signal day.
+      - Exits via TP or SL based on per symbol percentages, or at MAX_HOLDING_DAYS/end of data.
     """
     cash_balance = starting_cash
     current_position_quantity: float = 0.0
@@ -201,51 +257,73 @@ def simulate_backtest_for_symbol_with_intraday(
 
     take_profit_percent = get_take_profit_percent_for_symbol(symbol)
     stop_loss_percent = get_stop_loss_percent_for_symbol(symbol)
-    buy_quantity = get_buy_quantity_for_symbol(symbol)
 
     bar_index = 0
     while bar_index < num_bars - 1:
         current_bar_row = daily_bars_dataframe.iloc[bar_index]
-        next_bar_row = daily_bars_dataframe.iloc[bar_index + 1]
-
         current_timestamp: pd.Timestamp = current_bar_row["timestamp"]
 
         # ------------------------------------------------------
-        # If we are flat: daily breakout + intraday confirmation
+        # If we are flat: daily breakout plus intraday confirmation
         # ------------------------------------------------------
         if current_position_quantity == 0.0:
+            # 1) Daily breakout signal
             entry_signal = compute_entry_signal_for_index(
                 symbol=symbol,
                 daily_bars_dataframe=daily_bars_dataframe,
                 current_index=bar_index,
             )
 
-            if entry_signal is not None:
-                proposed_limit_price = entry_signal.limit_price
+            if entry_signal is None:
+                bar_index += 1
+                continue
 
-                intraday_ok = intraday_confirmation_for_day(
-                    proposed_limit_price=proposed_limit_price,
-                    daily_timestamp=current_timestamp,
-                    intraday_bars_dataframe=intraday_bars_dataframe,
-                )
+            # 2) Intraday confirmation for the same calendar date
+            is_confirmed = intraday_confirmation_for_day(
+                proposed_limit_price=entry_signal.limit_price,
+                daily_timestamp=current_timestamp,
+                intraday_bars_dataframe=intraday_bars_dataframe,
+            )
 
-                if intraday_ok:
-                    entry_price = float(next_bar_row["open"])
-                    required_cash = buy_quantity * entry_price
+            if not is_confirmed:
+                bar_index += 1
+                continue
 
-                    if required_cash <= cash_balance:
-                        current_position_quantity = buy_quantity
-                        current_entry_price = entry_price
-                        current_entry_date = next_bar_row["timestamp"]
+            # 3) Define entry price and stop loss
+            entry_price = float(current_bar_row["open"])
+            stop_loss_price = entry_price * (1.0 - stop_loss_percent / 100.0)
 
-                        current_take_profit_price = current_entry_price * (
-                            1.0 + take_profit_percent / 100.0
-                        )
-                        current_stop_loss_price = current_entry_price * (
-                            1.0 - stop_loss_percent / 100.0
-                        )
+            # 4) Risk sizing: how many shares can we afford
+            risk_r_per_trade = RISK_R_PER_TRADE_DEFAULT
+            buy_quantity = compute_risk_based_position_size(
+                symbol=symbol,
+                entry_price=entry_price,
+                stop_loss_price=stop_loss_price,
+                available_cash=cash_balance,
+                r_per_trade=risk_r_per_trade,
+                starting_cash=starting_cash,
+            )
 
-                        cash_balance -= required_cash
+            if buy_quantity <= 0:
+                bar_index += 1
+                continue
+
+            required_cash = buy_quantity * entry_price
+            if required_cash > cash_balance:
+                bar_index += 1
+                continue
+
+            # 5) Open the position
+            current_position_quantity = buy_quantity
+            current_entry_price = entry_price
+            current_entry_date = current_timestamp
+
+            current_take_profit_price = entry_price * (
+                1.0 + take_profit_percent / 100.0
+            )
+            current_stop_loss_price = stop_loss_price
+
+            cash_balance -= required_cash
 
         # ------------------------------------------------------
         # If we are in a position: check exits
@@ -275,8 +353,14 @@ def simulate_backtest_for_symbol_with_intraday(
                 gross_proceeds = current_position_quantity * exit_price
                 cash_balance += gross_proceeds
 
-                pnl_dollars = (exit_price - current_entry_price) * current_position_quantity
-                pnl_percent = (exit_price - current_entry_price) / current_entry_price * 100.0
+                pnl_dollars = (
+                    (exit_price - current_entry_price) * current_position_quantity
+                )
+                pnl_percent = (
+                    (exit_price - current_entry_price)
+                    / current_entry_price
+                    * 100.0
+                )
                 holding_days = (current_timestamp - current_entry_date).days
 
                 executed_trades.append(
@@ -302,7 +386,7 @@ def simulate_backtest_for_symbol_with_intraday(
         bar_index += 1
 
     # ------------------------------------------------------
-    # If still in a trade at end-of-data, exit at last close
+    # If still in a trade at end of data, exit at last close
     # ------------------------------------------------------
     if current_position_quantity > 0.0:
         last_bar_row = daily_bars_dataframe.iloc[-1]
@@ -315,8 +399,14 @@ def simulate_backtest_for_symbol_with_intraday(
         gross_proceeds = current_position_quantity * final_close_price
         cash_balance += gross_proceeds
 
-        pnl_dollars = (final_close_price - current_entry_price) * current_position_quantity
-        pnl_percent = (final_close_price - current_entry_price) / current_entry_price * 100.0
+        pnl_dollars = (
+            (final_close_price - current_entry_price) * current_position_quantity
+        )
+        pnl_percent = (
+            (final_close_price - current_entry_price)
+            / current_entry_price
+            * 100.0
+        )
         holding_days = (final_timestamp - current_entry_date).days
 
         executed_trades.append(

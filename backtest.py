@@ -17,7 +17,7 @@ from config import (
     DEFAULT_BUY_QTY,
 )
 
-from risk_sizing import compute_risk_limited_buy_quantity, compute_risk_based_position_size
+from risk_sizing import compute_risk_limited_buy_quantity as compute_risk_based_position_size
 
 from signals import (
     #compute_recent_high_breakout_signal,
@@ -225,45 +225,45 @@ def simulate_backtest_for_symbol_daily(
         # ------------------------------------------------------
         # If we are flat: look for a daily entry signal
         # ------------------------------------------------------
-if current_position_quantity == 0.0:
-    entry_signal = compute_entry_signal_for_index(
-        symbol=symbol,
-        daily_bars_dataframe=daily_bars_dataframe,
-        current_index=bar_index,
-    )
+        if current_position_quantity == 0.0:
+            entry_signal = compute_entry_signal_for_index(
+                symbol=symbol,
+                daily_bars_dataframe=daily_bars_dataframe,
+                current_index=bar_index,
+            )
 
-    if entry_signal is not None:
-        # Enter at NEXT day open using risk-limited sizing
-        entry_price = float(next_bar_row["open"])
+            if entry_signal is not None:
+                # Enter at NEXT day open using risk-limited sizing
+                entry_price = float(next_bar_row["open"])
 
-        buy_quantity = compute_risk_limited_buy_quantity(
-            symbol=symbol,
-            entry_price=entry_price,
-            account_cash=cash_balance,
-            stop_loss_percent=stop_loss_percent,
-        )
+                buy_quantity = compute_risk_based_buy_quantity(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    account_cash=cash_balance,
+                    stop_loss_percent=stop_loss_percent,
+                )
 
-        if buy_quantity <= 0:
-            bar_index += 1
-            continue
+                if buy_quantity <= 0:
+                    bar_index += 1
+                    continue
 
-        required_cash = buy_quantity * entry_price
-        if required_cash > cash_balance:
-            bar_index += 1
-            continue
+                required_cash = buy_quantity * entry_price
+                if required_cash > cash_balance:
+                    bar_index += 1
+                    continue
 
-        current_position_quantity = buy_quantity
-        current_entry_price = entry_price
-        current_entry_date = next_bar_row["timestamp"]
+                current_position_quantity = buy_quantity
+                current_entry_price = entry_price
+                current_entry_date = next_bar_row["timestamp"]
 
-        current_take_profit_price = entry_price * (
-            1.0 + take_profit_percent / 100.0
-        )
-        current_stop_loss_price = entry_price * (
-            1.0 - stop_loss_percent / 100.0
-        )
+                current_take_profit_price = entry_price * (
+                    1.0 + take_profit_percent / 100.0
+                )
+                current_stop_loss_price = entry_price * (
+                    1.0 - stop_loss_percent / 100.0
+                )
 
-        cash_balance -= required_cash
+                cash_balance -= required_cash
 
         # ------------------------------------------------------
         # If we are in a position: check exit conditions

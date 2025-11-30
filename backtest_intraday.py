@@ -128,50 +128,6 @@ def get_buy_quantity_for_symbol(symbol: str) -> float:
 
 
 # ------------------------------------------------------------------
-# Risk based decisions
-# ------------------------------------------------------------------
-
-def compute_risk_based_position_size(
-    symbol: str,
-    entry_price: float,
-    stop_loss_price: float,
-    available_cash: float,
-    r_per_trade: float,
-    starting_cash: float = STARTING_CASH_DEFAULT,
-) -> float:
-    """
-    Compute position size based on risk per trade:
-      - risk per share = entry_price - stop_loss_price (for longs)
-      - dollar risk allowed = starting_cash * MAX_RISK_FRACTION_PER_TRADE * r_per_trade
-      - shares = min(available_cash / entry_price, dollar_risk_allowed / risk_per_share)
-
-    Returns:
-      - number of shares to buy (float, but you can round if you like)
-    """
-    if entry_price <= 0 or stop_loss_price <= 0:
-        return 0.0
-
-    risk_per_share = entry_price - stop_loss_price
-    if risk_per_share <= 0:
-        # No risk or invalid (stop above entry for a long)
-        return 0.0
-
-    dollar_risk_allowed = starting_cash * MAX_RISK_FRACTION_PER_TRADE * r_per_trade
-
-    # Shares limited both by cash and by risk
-    max_shares_by_cash = available_cash / entry_price
-    max_shares_by_risk = dollar_risk_allowed / risk_per_share
-
-    shares = min(max_shares_by_cash, max_shares_by_risk)
-
-    if shares <= 0:
-        return 0.0
-
-    # Use whole shares
-    return float(int(shares))
-
-
-# ------------------------------------------------------------------
 # Intraday confirmation logic
 # ------------------------------------------------------------------
 

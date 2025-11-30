@@ -220,6 +220,23 @@ def compute_sma_trend_entry_signal(bars: pd.DataFrame) -> Optional[EntrySignal]:
 
     return EntrySignal(limit_price=limit_price, reason=reason)
 
+def compute_entry_signal_for_mode(
+    bars: pd.DataFrame,
+    mode: str = "breakout",
+) -> Optional[EntrySignal]:
+    """
+    Dispatch to the correct entry signal implementation based on `mode`.
+
+    mode:
+        - "breakout": use compute_recent_high_breakout_signal
+        - "sma_trend": use compute_sma_trend_entry_signal
+    """
+    if mode == "breakout":
+        return compute_recent_high_breakout_signal(bars)
+    elif mode == "sma_trend":
+        return compute_sma_trend_entry_signal(bars)
+    else:
+        raise ValueError(f"Unknown entry signal mode: {mode}")
 
 
 if __name__ == "__main__":

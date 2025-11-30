@@ -103,43 +103,41 @@ def compute_risk_based_position_size(
     starting_cash: float,
 ) -> float:
     """
-    Compute how many shares we can buy based on risk-per-trade (R),
-    available cash, and the distance from entry to stop loss.
+    Compute how many shares to buy for a single trade, given:
 
-    Parameters
-    ----------
-    entry_price : float
-        Proposed entry price.
-    stop_loss_price : float
-        Fixed stop loss price for the trade.
-    available_cash : float
-        Cash available for the backtester or live trading.
-    r_per_trade : float
-        Fraction of starting capital to risk per trade. Example: 0.01 = risk 1% of account.
-    starting_cash : float
-        The 'virtual' account size (e.g., 2000).
+      - entry_price:       proposed entry price
+      - stop_loss_price:   SL level for the trade
+      - available_cash:    how much cash we can spend right now
+      - r_per_trade:       fraction of starting_cash we are willing to risk (e.g. 0.01 = 1R)
+      - starting_cash:     baseline account size (e.g. 2000 for a “risk-limited” account)
 
-    Returns
-    -------
-    int
-        Number of shares we can afford under these constraints.
+    The idea:
+      - Risk per share = entry_price - stop_loss_price
+      - Max risk in dollars = r_per_trade * starting_cash
+      - Max shares by risk = max_risk_dollars / risk_per_share
+      - Also cap by what we can actually pay for with available_cash.
     """
-    # Risk (R) = risk_per_trade * starting_cash
-    risk_per_trade_dollars = r_per_trade * starting_cash
+    if entry_price <= 0 or stop_loss_price <= 0:
+        return 0.0
 
-    stop_distance = abs(entry_price - stop_loss_price)
-    if stop_distance <= 0:
-        return 0
+    risk_per_share = entry_price - stop_loss_price
+    if risk_per_share <= 0:
+        # No meaningful SL below entry => cannot size by risk.
+        return 0.0
 
-    # How many shares position size by risk?
-    shares_by_risk = risk_per_trade_dollars / stop_distance
+    max_risk_dollars = r_per_trade * starting_cash
+    if max_risk_dollars <= 0:
+        return 0.0
 
-    # How many shares can we buy given available cash?
-    if entry_price <= 0:
-        return 0
-    shares_by_cash = available_cash / entry_price
+    # Shares limited by risk
+    max_shares_by_risk = max_risk_dollars / risk_per_share
 
-    # Final position size is the smaller of the two.
-    shares = int(min(shares_by_risk, shares_by_cash))
+    # Shares limited by available cash
+    max_shares_by_cash = available_cash / entry_price
 
-    return max(shares, 0)
+    # Final allowed share count
+    buy_quantity = min(max_shares_by_risk, max_shares_by_cash)
+
+    # We’ll round down to whole shares for now.
+    buy_quantity = int(buy_quantity)
+    return float(buy_quantity)

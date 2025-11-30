@@ -20,9 +20,10 @@ from config import (
 from risk_sizing import compute_risk_limited_buy_quantity, compute_risk_based_position_size
 
 from signals import (
-    compute_recent_high_breakout_signal,
-    compute_sma_trend_entry_signal,
+    #compute_recent_high_breakout_signal,
+    #compute_sma_trend_entry_signal,
     EntrySignal,
+    compute_entry_signal_for_mode,
 )
 
 import argparse
@@ -177,12 +178,8 @@ def compute_entry_signal_for_index(
     if bars_up_to_now.empty:
         return None
 
-    if ENTRY_SIGNAL_MODE == "breakout":
-        return compute_recent_high_breakout_signal(bars_up_to_now)
-    elif ENTRY_SIGNAL_MODE == "sma_trend":
-        return compute_sma_trend_entry_signal(bars_up_to_now)
-    else:
-        raise ValueError(f"Unknown ENTRY_SIGNAL_MODE: {ENTRY_SIGNAL_MODE}")
+    # Single dispatcher call into the signals module
+    return compute_entry_signal_for_mode(bars_up_to_now, mode=ENTRY_SIGNAL_MODE)
 
 
 def simulate_backtest_for_symbol_daily(
@@ -228,51 +225,45 @@ def simulate_backtest_for_symbol_daily(
         # ------------------------------------------------------
         # If we are flat: look for a daily entry signal
         # ------------------------------------------------------
-        if current_position_quantity == 0.0:
-            entry_signal = compute_entry_signal_for_index(
-                symbol=symbol,
-                daily_bars_dataframe=daily_bars_dataframe,
-                current_index=bar_index,
-            )
+if current_position_quantity == 0.0:
+    entry_signal = compute_entry_signal_for_index(
+        symbol=symbol,
+        daily_bars_dataframe=daily_bars_dataframe,
+        current_index=bar_index,
+    )
 
-            if current_position_quantity == 0.0:
-                entry_signal = compute_entry_signal_for_index(
-                    symbol=symbol,
-                    daily_bars_dataframe=daily_bars_dataframe,
-                    current_index=bar_index,
-                )
+    if entry_signal is not None:
+        # Enter at NEXT day open using risk-limited sizing
+        entry_price = float(next_bar_row["open"])
 
-                if entry_signal is not None:
-                    # Enter at NEXT day open using risk-limited sizing
-                    entry_price = float(next_bar_row["open"])
+        buy_quantity = compute_risk_limited_buy_quantity(
+            symbol=symbol,
+            entry_price=entry_price,
+            account_cash=cash_balance,
+            stop_loss_percent=stop_loss_percent,
+        )
 
-                    buy_quantity = compute_risk_limited_buy_quantity(
-                        symbol=symbol,
-                        entry_price=entry_price,
-                        account_cash=cash_balance,
-                        stop_loss_percent=stop_loss_percent,
-                        # you can also pass overrides for max_risk_percent_per_trade / max_capital_percent_per_trade here if you want
-                    )
+        if buy_quantity <= 0:
+            bar_index += 1
+            continue
 
-                    if buy_quantity <= 0:
-                        # Risk-based sizing says: do not enter this trade
-                        pass
-                    else:
-                        required_cash = buy_quantity * entry_price
+        required_cash = buy_quantity * entry_price
+        if required_cash > cash_balance:
+            bar_index += 1
+            continue
 
-                        if required_cash <= cash_balance:
-                            current_position_quantity = buy_quantity
-                            current_entry_price = entry_price
-                            current_entry_date = next_bar_row["timestamp"]
+        current_position_quantity = buy_quantity
+        current_entry_price = entry_price
+        current_entry_date = next_bar_row["timestamp"]
 
-                            current_take_profit_price = current_entry_price * (
-                                1.0 + take_profit_percent / 100.0
-                            )
-                            current_stop_loss_price = current_entry_price * (
-                                1.0 - stop_loss_percent / 100.0
-                            )
+        current_take_profit_price = entry_price * (
+            1.0 + take_profit_percent / 100.0
+        )
+        current_stop_loss_price = entry_price * (
+            1.0 - stop_loss_percent / 100.0
+        )
 
-                            cash_balance -= required_cash
+        cash_balance -= required_cash
 
         # ------------------------------------------------------
         # If we are in a position: check exit conditions

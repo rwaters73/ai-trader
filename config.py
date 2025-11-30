@@ -87,6 +87,10 @@ ATR_TP_MULTIPLIER_DEFAULT = 2.0
 # How many ATRs below entry price for stop loss
 ATR_SL_MULTIPLIER_DEFAULT = 1.5
 
+# ATR-based exit defaults
+ATR_MULTIPLIER_TP_DEFAULT = 2.0       # TP at +2 ATR
+ATR_MULTIPLIER_SL_DEFAULT = 1.0       # SL at -1 ATR
+
 # Fraction of capital to risk per trade in backtests
 # Example: 0.01 means risk 1 percent of current cash per trade
 RISK_R_PER_TRADE_DEFAULT = 0.01
@@ -196,6 +200,18 @@ MIN_INTRADAY_BARS_FOR_CONFIRMATION = 3
 # Example: 1.0 -> if intraday last close is more than 1% below the proposed
 # limit price, we veto the trade as "too weak" intraday.
 MAX_INTRADAY_PULLBACK_PCT = 1.0
+
+# ------------------------------------------------
+# Risk / sizing configuration
+# ------------------------------------------------
+
+# Synthetic "risk-limited" starting capital for sizing positions,
+# independent of whatever Alpaca says your account balance is.
+RISK_LIMITED_STARTING_CASH = 2000.0   # dollars
+
+# Fraction of that risk-limited capital we always want to keep in cash.
+# 0.5 means we never want to drop below 50% cash.
+MIN_CASH_RESERVE_FRACTION = 0.5       # 50%
 
 # ---------------------------------------------------------------------------
 # Per-symbol bracket-style TP/SL percentages

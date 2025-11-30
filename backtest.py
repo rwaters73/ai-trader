@@ -330,6 +330,7 @@ def simulate_backtest_for_symbol_daily(
                 stop_loss_price=stop_loss_price,
                 available_cash=cash_balance,
                 r_per_trade=risk_r_per_trade,
+                starting_cash=starting_cash,
             )
 
             if buy_quantity <= 0:

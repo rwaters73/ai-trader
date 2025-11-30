@@ -17,8 +17,6 @@ from config import (
     DEFAULT_BUY_QTY,
 )
 
-from risk_sizing import compute_risk_limited_buy_quantity as compute_risk_based_position_size
-
 from signals import (
     #compute_recent_high_breakout_signal,
     #compute_sma_trend_entry_signal,
@@ -233,14 +231,17 @@ def simulate_backtest_for_symbol_daily(
             )
 
             if entry_signal is not None:
-                # Enter at NEXT day open using risk-limited sizing
+                # Enter at NEXT day open
                 entry_price = float(next_bar_row["open"])
 
+                # Define stop loss as a percentage below entry
+                stop_loss_price = entry_price * (1.0 - stop_loss_percent / 100.0)
+
+                # Use our simple risk based sizing: 1 percent of equity per trade
                 buy_quantity = compute_risk_based_buy_quantity(
-                    symbol=symbol,
                     entry_price=entry_price,
-                    account_cash=cash_balance,
                     stop_loss_percent=stop_loss_percent,
+                    current_equity=cash_balance,
                 )
 
                 if buy_quantity <= 0:
@@ -256,12 +257,10 @@ def simulate_backtest_for_symbol_daily(
                 current_entry_price = entry_price
                 current_entry_date = next_bar_row["timestamp"]
 
-                current_take_profit_price = entry_price * (
+                current_take_profit_price = current_entry_price * (
                     1.0 + take_profit_percent / 100.0
                 )
-                current_stop_loss_price = entry_price * (
-                    1.0 - stop_loss_percent / 100.0
-                )
+                current_stop_loss_price = stop_loss_price
 
                 cash_balance -= required_cash
 

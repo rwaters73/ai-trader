@@ -74,6 +74,22 @@ BRACKET_SL_PCT_BY_SYMBOL = {
     "TSLA": 3.0,
 }
 
+# ==========================================================
+# ATR based stop loss and take profit configuration
+# ==========================================================
+
+# Number of bars to use when computing ATR in backtests
+ATR_PERIOD_DEFAULT = 14
+
+# How many ATRs above entry price for take profit
+ATR_TP_MULTIPLIER_DEFAULT = 2.0
+
+# How many ATRs below entry price for stop loss
+ATR_SL_MULTIPLIER_DEFAULT = 1.5
+
+# Fraction of capital to risk per trade in backtests
+# Example: 0.01 means risk 1 percent of current cash per trade
+RISK_R_PER_TRADE_DEFAULT = 0.01
 
 
 # End-of-day (EOD) policies per symbol.

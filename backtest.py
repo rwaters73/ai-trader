@@ -8,8 +8,6 @@ from datetime import timedelta
 
 import pandas as pd
 
-import math
-
 from config import (
     TP_PERCENT_BY_SYMBOL,
     DEFAULT_TP_PERCENT,
@@ -17,8 +15,15 @@ from config import (
     DEFAULT_BRACKET_SL_PERCENT,
     BUY_QTY_BY_SYMBOL,
     DEFAULT_BUY_QTY,
-    RISK_PERCENT_PER_TRADE as RISK_R_PER_TRADE_DEFAULT,
+    ATR_PERIOD_DEFAULT,
+    ATR_TP_MULTIPLIER_DEFAULT,
+    ATR_SL_MULTIPLIER_DEFAULT,
+    RISK_R_PER_TRADE_DEFAULT,
 )
+
+from risk_sizing import compute_risk_based_position_size
+
+import math
 
 from signals import (
     compute_recent_high_breakout_signal,
@@ -108,6 +113,29 @@ def load_daily_bars_from_csv(csv_path: str) -> pd.DataFrame:
         daily_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
     )
     return daily_bars_dataframe
+
+def compute_atr(daily_bars_dataframe: pd.DataFrame, period: int) -> pd.Series:
+    """
+    Compute Average True Range (ATR) over the given period.
+    Returns a pandas Series aligned with daily_bars_dataframe.index.
+    """
+    high = daily_bars_dataframe["high"].astype(float)
+    low = daily_bars_dataframe["low"].astype(float)
+    close = daily_bars_dataframe["close"].astype(float)
+
+    previous_close = close.shift(1)
+
+    true_range_1 = high - low
+    true_range_2 = (high - previous_close).abs()
+    true_range_3 = (low - previous_close).abs()
+
+    true_range = pd.concat(
+        [true_range_1, true_range_2, true_range_3],
+        axis=1,
+    ).max(axis=1)
+
+    atr = true_range.rolling(window=period, min_periods=period).mean()
+    return atr
 
 
 def get_take_profit_percent_for_symbol(symbol: str) -> float:
@@ -232,26 +260,17 @@ def simulate_backtest_for_symbol_daily(
     starting_cash: float = STARTING_CASH_DEFAULT,
 ) -> Tuple[float, List[BacktestTrade]]:
     """
-    Daily-only backtest using ATR-based stop-loss and take-profit:
+    Daily-only backtest with ATR-based TP/SL and risk-based position sizing:
 
-      - Uses the same entry signal logic as live trading:
-          * ENTRY_SIGNAL_MODE == "breakout"  -> compute_recent_high_breakout_signal
-          * ENTRY_SIGNAL_MODE == "sma_trend" -> compute_sma_trend_entry_signal
-      - Enters at the current bar's OPEN when a signal appears.
-      - Exits using ATR-based stop-loss and take-profit:
-          stop_loss_price = entry_price - ATR_STOP_MULTIPLIER * ATR
-          take_profit_price = entry_price + ATR_TP_MULTIPLIER * ATR
-      - Position size is computed with risk-based sizing so that each trade
-        risks at most RISK_R_PER_TRADE_DEFAULT fraction of starting cash.
-      - Also forces exit after MAX_HOLDING_DAYS or at end-of-data.
+      - Uses the same daily entry logic (breakout or SMA trend).
+      - Enters at NEXT DAY'S OPEN after the signal bar.
+      - Uses ATR-based stop-loss and take-profit:
+          stop_loss  = entry_price - ATR_SL_MULTIPLIER_DEFAULT * ATR
+          take_profit = entry_price + ATR_TP_MULTIPLIER_DEFAULT * ATR
+      - Position size is computed via compute_risk_based_position_size,
+        risking RISK_R_PER_TRADE_DEFAULT * available_cash per trade.
+      - Exits via TP, SL, time-based (MAX_HOLDING_DAYS), or at end-of-data.
     """
-    if len(daily_bars_dataframe) < ATR_LOOKBACK_DAYS + 1:
-        # Not enough history to compute ATR and then trade.
-        return starting_cash, []
-
-    # Attach ATR column
-    bars_with_atr = add_atr_column(daily_bars_dataframe, ATR_LOOKBACK_DAYS)
-
     cash_balance = starting_cash
     current_position_quantity: float = 0.0
     current_entry_price: Optional[float] = None
@@ -261,57 +280,56 @@ def simulate_backtest_for_symbol_daily(
 
     executed_trades: List[BacktestTrade] = []
 
-    num_bars = len(bars_with_atr)
-    bar_index = 0
+    num_bars = len(daily_bars_dataframe)
+    if num_bars < 2:
+        # Need at least two bars to have "signal day" + "entry day"
+        return cash_balance, executed_trades
 
-    while bar_index < num_bars:
-        current_bar_row = bars_with_atr.iloc[bar_index]
+    # Precompute ATR for ATR-based TP/SL
+    atr_series = compute_atr(daily_bars_dataframe, ATR_PERIOD_DEFAULT)
+
+    bar_index = 0
+    while bar_index < num_bars - 1:
+        current_bar_row = daily_bars_dataframe.iloc[bar_index]
+        next_bar_row = daily_bars_dataframe.iloc[bar_index + 1]
+
         current_timestamp: pd.Timestamp = current_bar_row["timestamp"]
+        current_atr = float(atr_series.iloc[bar_index]) if not pd.isna(atr_series.iloc[bar_index]) else None
 
         # ------------------------------------------------------
         # If we are flat: look for an entry signal
         # ------------------------------------------------------
         if current_position_quantity == 0.0:
-            # Require ATR to be available
-            atr_value = float(current_bar_row.get("atr", float("nan")))
-            if math.isnan(atr_value) or atr_value <= 0:
+            # We need ATR to be available
+            if current_atr is None:
                 bar_index += 1
                 continue
 
-            # Slice bars up to this index for the signal function
-            bars_up_to_now = bars_with_atr.iloc[: bar_index + 1]
-
-            if ENTRY_SIGNAL_MODE == "sma_trend":
-                entry_signal = compute_sma_trend_entry_signal(bars_up_to_now)
-            else:
-                entry_signal = compute_recent_high_breakout_signal(bars_up_to_now)
+            entry_signal = compute_entry_signal_for_index(
+                symbol=symbol,
+                daily_bars_dataframe=daily_bars_dataframe,
+                current_index=bar_index,
+            )
 
             if entry_signal is None:
                 bar_index += 1
                 continue
 
-            # Enter at current bar open
-            entry_price = float(current_bar_row["open"])
-            if entry_price <= 0:
-                bar_index += 1
-                continue
+            # Enter at NEXT day's open
+            entry_price = float(next_bar_row["open"])
 
-            # ATR-based stop-loss and take-profit
-            stop_loss_price = entry_price - ATR_STOP_MULTIPLIER * atr_value
-            take_profit_price = entry_price + ATR_TP_MULTIPLIER * atr_value
-
-            # If stop is invalid (would be negative), skip
-            if stop_loss_price <= 0 or stop_loss_price >= entry_price:
-                bar_index += 1
-                continue
+            # ATR-based stop loss and take profit
+            stop_loss_price = entry_price - ATR_SL_MULTIPLIER_DEFAULT * current_atr
+            take_profit_price = entry_price + ATR_TP_MULTIPLIER_DEFAULT * current_atr
 
             # Risk-based position sizing
-            buy_quantity = compute_risk_based_buy_quantity(
-                available_cash=cash_balance,
+            risk_r_per_trade = RISK_R_PER_TRADE_DEFAULT
+
+            buy_quantity = compute_risk_based_position_size(
                 entry_price=entry_price,
                 stop_loss_price=stop_loss_price,
-                r_per_trade=RISK_R_PER_TRADE_DEFAULT,
-                starting_cash=starting_cash,
+                available_cash=cash_balance,
+                r_per_trade=risk_r_per_trade,
             )
 
             if buy_quantity <= 0:
@@ -326,7 +344,7 @@ def simulate_backtest_for_symbol_daily(
             # Open the position
             current_position_quantity = buy_quantity
             current_entry_price = entry_price
-            current_entry_date = current_timestamp
+            current_entry_date = next_bar_row["timestamp"]
             current_take_profit_price = take_profit_price
             current_stop_loss_price = stop_loss_price
 
@@ -364,14 +382,8 @@ def simulate_backtest_for_symbol_daily(
                 gross_proceeds = current_position_quantity * exit_price
                 cash_balance += gross_proceeds
 
-                pnl_dollars = (
-                    (exit_price - current_entry_price) * current_position_quantity
-                )
-                pnl_percent = (
-                    (exit_price - current_entry_price)
-                    / current_entry_price
-                    * 100.0
-                )
+                pnl_dollars = (exit_price - current_entry_price) * current_position_quantity
+                pnl_percent = (exit_price - current_entry_price) / current_entry_price * 100.0
                 holding_days = (current_timestamp - current_entry_date).days
 
                 executed_trades.append(
@@ -401,7 +413,7 @@ def simulate_backtest_for_symbol_daily(
     # If still in a trade at end-of-data, exit at last close
     # ------------------------------------------------------
     if current_position_quantity > 0.0:
-        last_bar_row = bars_with_atr.iloc[-1]
+        last_bar_row = daily_bars_dataframe.iloc[-1]
         final_timestamp: pd.Timestamp = last_bar_row["timestamp"]
         final_close_price = float(last_bar_row["close"])
 
@@ -411,14 +423,8 @@ def simulate_backtest_for_symbol_daily(
         gross_proceeds = current_position_quantity * final_close_price
         cash_balance += gross_proceeds
 
-        pnl_dollars = (
-            (final_close_price - current_entry_price) * current_position_quantity
-        )
-        pnl_percent = (
-            (final_close_price - current_entry_price)
-            / current_entry_price
-            * 100.0
-        )
+        pnl_dollars = (final_close_price - current_entry_price) * current_position_quantity
+        pnl_percent = (final_close_price - current_entry_price) / current_entry_price * 100.0
         holding_days = (final_timestamp - current_entry_date).days
 
         executed_trades.append(

@@ -32,7 +32,7 @@ from config import (
     BRACKET_SL_PERCENT_BY_SYMBOL,
     DEFAULT_BRACKET_SL_PERCENT,
     ATR_PERIOD_DEFAULT,
-    ATR_SL_MULTIPLIER_DEFAULT,
+    ATR_MULTIPLIER_SL_DEFAULT,
     ATR_TP_MULTIPLIER_DEFAULT,
 )
 
@@ -579,11 +579,11 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
 
     if atr_value is not None:
         take_profit_price = average_entry_price + ATR_TP_MULTIPLIER_DEFAULT * atr_value
-        stop_loss_price = average_entry_price - ATR_SL_MULTIPLIER_DEFAULT * atr_value
+        stop_loss_price = average_entry_price - ATR_MULTIPLIER_SL_DEFAULT * atr_value
         print(
             f"{symbol}: Using ATR-based exits. ATR={atr_value:.2f}, "
             f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f} "
-            f"(TP_mult={ATR_TP_MULTIPLIER_DEFAULT}, SL_mult={ATR_SL_MULTIPLIER_DEFAULT})."
+            f"(TP_mult={ATR_TP_MULTIPLIER_DEFAULT}, SL_mult={ATR_MULTIPLIER_SL_DEFAULT})."
         )
     else:
         # Fallback: percentage-based exits from config

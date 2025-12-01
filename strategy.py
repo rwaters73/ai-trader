@@ -170,33 +170,90 @@ def _decide_entry_from_daily_and_intraday(state: SymbolState) -> TargetPosition:
 
     # ----------------------------------------------------
     # Intraday confirmation passed: we are willing to enter.
-    # Here is where we tell the broker layer to use a LIMIT entry.
+    # Now compute ATR-based stop and take-profit, and size the trade.
     # ----------------------------------------------------
-    # Intraday confirmation passed: we are willing to enter.
-    from config import RISK_PERCENT_PER_TRADE
 
-    stop_loss_price = daily_entry_signal.limit_price * (1 - MAX_INTRADAY_PULLBACK_PCT/100)
-    account_size = 100000.0  # later: replace with real fetched account value
-
-    buy_quantity = compute_risk_based_position_size(
-        entry_price=daily_entry_signal.limit_price,
-        stop_loss_price=stop_loss_price,
-        account_size=account_size,
-        risk_percent=RISK_PERCENT_PER_TRADE
+    # Compute ATR on the same daily history we used for the breakout logic.
+    atr_series = compute_atr_series(
+        daily_bars_dataframe,
+        period=ATR_PERIOD_DEFAULT,
     )
 
+    if atr_series is None or atr_series.dropna().empty:
+        return TargetPosition(
+            symbol=symbol,
+            target_qty=0.0,
+            reason=(
+                "Daily breakout signal present, but ATR series unavailable or empty. "
+                "Staying flat."
+            ),
+        )
+
+    current_atr = float(atr_series.iloc[-1])
+
+    # ATR-based stop and take-profit from the proposed limit price
+    stop_loss_price = proposed_limit_price - ATR_STOP_MULTIPLIER_DEFAULT * current_atr
+    take_profit_price = proposed_limit_price + ATR_TP_MULTIPLIER_DEFAULT * current_atr
+
+    # Basic sanity checks on levels
+    if stop_loss_price <= 0 or stop_loss_price >= proposed_limit_price:
+        return TargetPosition(
+            symbol=symbol,
+            target_qty=0.0,
+            reason=(
+                "ATR-based stop loss level is invalid (<= 0 or >= entry). "
+                "Staying flat."
+            ),
+        )
+
+    if take_profit_price <= proposed_limit_price:
+        return TargetPosition(
+            symbol=symbol,
+            target_qty=0.0,
+            reason=(
+                "ATR-based take-profit level is not above entry. "
+                "Staying flat."
+            ),
+        )
+
+    # Risk-based position sizing:
+    # - account_size is a stand-in for real account equity here.
+    #   Live sizing is further constrained in reconcile_position via risk_limits.
+    account_size = 100000.0
+    risk_percent = RISK_R_PER_TRADE_DEFAULT
+
+    buy_quantity = compute_risk_based_position_size(
+        entry_price=proposed_limit_price,
+        stop_loss_price=stop_loss_price,
+        account_size=account_size,
+        risk_percent=risk_percent,
+    )
+
+    if buy_quantity <= 0:
+        return TargetPosition(
+            symbol=symbol,
+            target_qty=0.0,
+            reason=(
+                "ATR-based sizing produced non-positive quantity. "
+                "Staying flat."
+            ),
+        )
+
     # Express this as a LIMIT entry so the broker layer can place a limit order
-    # at the breakout-derived price.
+    # at the breakout-derived price and use ATR-based TP/SL.
     return TargetPosition(
         symbol=symbol,
         target_qty=buy_quantity,
         reason=(
             "Daily breakout signal + intraday confirmation PASSED. "
-            f"Proposed limit entry at {proposed_limit_price:.2f}. "
+            f"ATR-based stop at {stop_loss_price:.2f}, "
+            f"ATR-based TP at {take_profit_price:.2f}. "
             f"Daily reason: {daily_entry_signal.reason}"
         ),
         entry_type="limit",
         entry_limit_price=proposed_limit_price,
+        take_profit_price=take_profit_price,
+        stop_loss_price=stop_loss_price,
     )
 
 

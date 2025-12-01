@@ -16,6 +16,7 @@ from config import (
     DEFAULT_BUY_QTY,
     MAX_INTRADAY_PULLBACK_PCT,
     MIN_INTRADAY_BARS_FOR_CONFIRMATION,
+    RISK_R_PER_TRADE_DEFAULT,
 )
 
 RISK_R_PER_TRADE_DEFAULT = 1.0  # how many "R" per trade
@@ -25,7 +26,7 @@ from signals import compute_recent_high_breakout_signal, EntrySignal
 
 from risk_limits import (
     compute_risk_based_position_size,
-    RISK_R_PER_TRADE_DEFAULT,
+    #RISK_R_PER_TRADE_DEFAULT,
 )
 
 from risk_sizing import compute_risk_limited_buy_quantity

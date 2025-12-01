@@ -1,3 +1,5 @@
+import pandas as pd
+
 from typing import Optional
 from datetime import datetime
 
@@ -18,9 +20,10 @@ except ImportError:
     StopOrderRequest = None  # type: ignore
 
 from logger import log_order  # CSV order log (still available if we want it)
-from data import get_latest_quote
+from data import get_latest_quote, get_recent_history
 from models import SymbolState, TargetPosition
 from db import log_order_to_db, log_order_event_to_db, log_risk_event_to_db
+
 from config import (
     ALPACA_API_KEY_ID,
     ALPACA_API_SECRET_KEY,
@@ -28,6 +31,9 @@ from config import (
     DEFAULT_BRACKET_TP_PERCENT,
     BRACKET_SL_PERCENT_BY_SYMBOL,
     DEFAULT_BRACKET_SL_PERCENT,
+    ATR_PERIOD_DEFAULT,
+    ATR_SL_MULTIPLIER_DEFAULT,
+    ATR_TP_MULTIPLIER_DEFAULT,
 )
 
 from risk_limits import build_risk_context, can_open_new_position
@@ -409,6 +415,60 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
         print(f"{state.symbol}: Order submitted:")
         print(order)
 
+def compute_atr_for_symbol(
+    symbol: str,
+    atr_period: int = ATR_PERIOD_DEFAULT,
+) -> Optional[float]:
+    """
+    Compute the latest ATR value for `symbol` using recent daily bars.
+
+    Returns:
+        Most recent ATR value (float) or None if ATR cannot be computed.
+    """
+    # Fetch slightly more than atr_period in case of missing days
+    lookback_days = atr_period + 10
+    daily_bars_dataframe = get_recent_history(symbol, lookback_days=lookback_days)
+
+    if daily_bars_dataframe is None or daily_bars_dataframe.empty:
+        print(f"[ATR] No daily bars available for {symbol}; cannot compute ATR.")
+        return None
+
+    # We expect columns: high, low, close
+    required_columns = {"high", "low", "close"}
+    if not required_columns.issubset(set(daily_bars_dataframe.columns)):
+        print(
+            f"[ATR] Missing required columns for {symbol}. "
+            f"Expected {required_columns}, got {set(daily_bars_dataframe.columns)}"
+        )
+        return None
+
+    # True Range (TR) per bar
+    high_series = daily_bars_dataframe["high"].astype(float)
+    low_series = daily_bars_dataframe["low"].astype(float)
+    close_series = daily_bars_dataframe["close"].astype(float)
+
+    previous_close_series = close_series.shift(1)
+
+    range_high_low = high_series - low_series
+    range_high_prev_close = (high_series - previous_close_series).abs()
+    range_low_prev_close = (low_series - previous_close_series).abs()
+
+    true_range_series = pd.concat(
+        [range_high_low, range_high_prev_close, range_low_prev_close],
+        axis=1,
+    ).max(axis=1)
+
+    # Simple moving average of TR for ATR
+    atr_series = true_range_series.rolling(window=atr_period).mean()
+
+    latest_atr = atr_series.iloc[-1]
+
+    if pd.isna(latest_atr):
+        print(f"[ATR] Computed ATR for {symbol} is NaN; not using ATR.")
+        return None
+
+    return float(latest_atr)
+
 
 def flatten_symbol(symbol: str):
     """
@@ -482,12 +542,16 @@ def cancel_all_open_orders() -> None:
 def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) -> None:
     """
     If we hold a long position in this symbol and there are no SELL exit orders
-    already open, create a take-profit LIMIT order (and a stop-loss order if supported).
+    already open, create ATR-based take-profit and stop-loss exits.
 
-    For now:
+    Behavior:
       - Only handles LONG positions (position_qty > 0).
-      - Creates a TP LIMIT SELL order, using per-symbol TP%.
-      - Attempts a SL STOP order, but may skip if StopOrderRequest is unavailable.
+      - Uses ATR to compute SL and TP:
+            SL  = avg_entry_price - ATR_SL_MULTIPLIER_DEFAULT * ATR
+            TP  = avg_entry_price + ATR_TP_MULTIPLIER_DEFAULT * ATR
+      - If ATR cannot be computed for any reason, falls back to
+        percentage-based exits from BRACKET_TP_PERCENT_BY_SYMBOL and
+        BRACKET_SL_PERCENT_BY_SYMBOL.
     """
     symbol = state.symbol
     position_quantity = state.position_qty
@@ -506,23 +570,44 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
                 print(f"{symbol}: SELL exit order(s) already present; not creating new TP/SL.")
                 return
         except Exception:
-            # If for some reason side isn't readable, be safe and do nothing.
+            # If for some reason side is not readable, be safe and do nothing.
             print(f"{symbol}: Could not inspect side on open order; skipping exit creation.")
             return
 
-    # Compute TP/SL percentages for this symbol
-    take_profit_percent = BRACKET_TP_PERCENT_BY_SYMBOL.get(symbol, DEFAULT_BRACKET_TP_PERCENT)
-    stop_loss_percent = BRACKET_SL_PERCENT_BY_SYMBOL.get(symbol, DEFAULT_BRACKET_SL_PERCENT)
+    # Try to compute ATR-based SL/TP
+    atr_value = compute_atr_for_symbol(symbol)
 
-    raw_take_profit_price = average_entry_price * (1.0 + take_profit_percent / 100.0)
-    take_profit_price = round(raw_take_profit_price, 2)
+    if atr_value is not None:
+        take_profit_price = average_entry_price + ATR_TP_MULTIPLIER_DEFAULT * atr_value
+        stop_loss_price = average_entry_price - ATR_SL_MULTIPLIER_DEFAULT * atr_value
+        print(
+            f"{symbol}: Using ATR-based exits. ATR={atr_value:.2f}, "
+            f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f} "
+            f"(TP_mult={ATR_TP_MULTIPLIER_DEFAULT}, SL_mult={ATR_SL_MULTIPLIER_DEFAULT})."
+        )
+    else:
+        # Fallback: percentage-based exits from config
+        take_profit_percent = BRACKET_TP_PERCENT_BY_SYMBOL.get(
+            symbol,
+            DEFAULT_BRACKET_TP_PERCENT,
+        )
+        stop_loss_percent = BRACKET_SL_PERCENT_BY_SYMBOL.get(
+            symbol,
+            DEFAULT_BRACKET_SL_PERCENT,
+        )
 
-    stop_loss_price = average_entry_price * (1.0 - stop_loss_percent / 100.0)
+        take_profit_price = average_entry_price * (1.0 + take_profit_percent / 100.0)
+        stop_loss_price = average_entry_price * (1.0 - stop_loss_percent / 100.0)
+
+        print(
+            f"{symbol}: ATR not available. Falling back to percent-based exits. "
+            f"TP={take_profit_price:.2f} (+{take_profit_percent}%), "
+            f"SL={stop_loss_price:.2f} (-{stop_loss_percent}%)."
+        )
 
     print(
-        f"{symbol}: No SELL exits found. Creating TP LIMIT at {take_profit_price:.2f} "
-        f"(+{take_profit_percent}%) for quantity={position_quantity}. "
-        f"Planned SL at {stop_loss_price:.2f} (-{stop_loss_percent}%) [TODO if unsupported]."
+        f"{symbol}: Creating TP LIMIT at {take_profit_price:.2f} "
+        f"and SL STOP at {stop_loss_price:.2f} for quantity={position_quantity}."
     )
 
     # --- Create TP LIMIT SELL order ---

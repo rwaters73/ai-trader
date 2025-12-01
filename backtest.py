@@ -17,7 +17,7 @@ from config import (
     DEFAULT_BUY_QTY,
     ATR_PERIOD_DEFAULT,
     ATR_TP_MULTIPLIER_DEFAULT,
-    ATR_SL_MULTIPLIER_DEFAULT,
+    ATR_STOP_MULTIPLIER_DEFAULT,
     RISK_R_PER_TRADE_DEFAULT,
 )
 
@@ -64,8 +64,8 @@ MAX_POSITION_FRACTION_OF_EQUITY = 0.20  # 20% of equity in any one trade
 
 # ATR-based exit configuration
 ATR_LOOKBACK_DAYS = 14          # standard ATR period
-ATR_STOP_MULTIPLIER = 1.5       # stop-loss = entry_price - 1.5 * ATR
-ATR_TP_MULTIPLIER = 3.0         # take-profit = entry_price + 3.0 * ATR
+#ATR_STOP_MULTIPLIER = 1.5       # stop-loss = entry_price - 1.5 * ATR
+#ATR_TP_MULTIPLIER = 3.0         # take-profit = entry_price + 3.0 * ATR
 
 # ------------------------------------------------------------------
 # Data structures
@@ -319,7 +319,7 @@ def simulate_backtest_for_symbol_daily(
             entry_price = float(next_bar_row["open"])
 
             # ATR-based stop loss and take profit
-            stop_loss_price = entry_price - ATR_SL_MULTIPLIER_DEFAULT * current_atr
+            stop_loss_price = entry_price - ATR_STOP_MULTIPLIER_DEFAULT * current_atr
             take_profit_price = entry_price + ATR_TP_MULTIPLIER_DEFAULT * current_atr
 
             # Risk-based position sizing

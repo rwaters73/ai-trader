@@ -85,7 +85,7 @@ ATR_PERIOD_DEFAULT = 14
 ATR_TP_MULTIPLIER_DEFAULT = 2.0
 
 # How many ATRs below entry price for stop loss
-ATR_SL_MULTIPLIER_DEFAULT = 1.5
+ATR_STOP_MULTIPLIER_DEFAULT = 2.0
 
 # ATR-based exit defaults
 ATR_MULTIPLIER_TP_DEFAULT = 2.0       # TP at +2 ATR

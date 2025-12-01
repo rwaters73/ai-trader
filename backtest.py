@@ -25,6 +25,8 @@ from risk_sizing import compute_risk_based_position_size
 
 import math
 
+from indicators import compute_atr_series
+
 from signals import (
     compute_recent_high_breakout_signal,
     compute_sma_trend_entry_signal,

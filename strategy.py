@@ -10,10 +10,14 @@ from config import (
     MIN_INTRADAY_BARS_FOR_CONFIRMATION,
     INTRADAY_LOOKBACK_MINUTES,
     INTRADAY_BAR_SIZE_MINUTES,
+    ATR_PERIOD_DEFAULT,
+    ATR_STOP_MULTIPLIER_DEFAULT,
+    ATR_TP_MULTIPLIER_DEFAULT,
+    RISK_R_PER_TRADE_DEFAULT,
 )
 from data import get_recent_history, get_intraday_history
 from signals import compute_recent_high_breakout_signal, EntrySignal
-
+from indicators import compute_atr_series
 
 # ---------------------------------------------------------------------------
 # Helper functions

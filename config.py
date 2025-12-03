@@ -95,6 +95,21 @@ ATR_MULTIPLIER_SL_DEFAULT = 1.0       # SL at -1 ATR
 # Example: 0.01 means risk 1 percent of current cash per trade
 RISK_R_PER_TRADE_DEFAULT = 0.01
 
+# =========================
+# Market regime filtering
+# =========================
+
+REGIME_SPY_SYMBOL = "SPY"
+
+# How many days of SPY to look at for regime
+REGIME_LOOKBACK_DAYS = 250
+
+# Simple long-term moving average period for SPY
+REGIME_MA_PERIOD = 200
+
+# Small buffer so we are not flipping regime on tiny noise
+REGIME_MA_BUFFER_PCT = 0.5  # SPY must be at least 0.5% above/below MA
+
 
 # End-of-day (EOD) policies per symbol.
 # Types:

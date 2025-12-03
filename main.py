@@ -15,6 +15,9 @@ from models import SymbolState
 from strategy import decide_target_position
 from eod_policy import apply_eod_policy
 
+from regime import get_market_regime
+from models import TargetPosition  # you already import this somewhere, just make sure it is there
+
 
 def is_rth(now: datetime | None = None) -> bool:
     """
@@ -105,6 +108,8 @@ def main():
             in_rth = is_rth(now)
             in_ext = is_extended_session(now)
             in_eod = is_eod_window(now)
+            # Get market regime once per iteration (SPY-based)
+            market_regime = get_market_regime()
 
             if in_rth or in_ext:
                 session_label = "RTH" if in_rth else "Extended-hours"
@@ -125,6 +130,30 @@ def main():
                     if in_eod:
                         target = apply_eod_policy(state, target)
 
+                    # ------------------------------------------------
+                    # Regime filter: block NEW entries in bad regimes
+                    # ------------------------------------------------
+                    if (
+                        state.position_qty == 0.0
+                        and target.target_qty > 0.0
+                        and market_regime is not None
+                        and not market_regime.is_bull
+                    ):
+                        original_reason = target.reason
+                        target = TargetPosition(
+                            symbol=state.symbol,
+                            target_qty=0.0,
+                            reason=(
+                                f"Regime filter: blocking new long entries. "
+                                f"{market_regime.explanation} "
+                                f"(original entry reason: {original_reason})"
+                            ),
+                            entry_type="market",
+                            entry_limit_price=None,
+                            take_profit_price=None,
+                            stop_loss_price=None,
+                        )
+                        
                     log_decision(
                         state=state,
                         target=target,

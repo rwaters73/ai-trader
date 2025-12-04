@@ -121,7 +121,7 @@ def main(symbols: list[str] = None):
     if symbols is None:
         symbols = load_symbols_for_trading()
 
-    print(f"Starting bounded loop for symbols: {', '.join(SYMBOLS)}")
+    print(f"Starting bounded loop for symbols: {', '.join(symbols)}")
     print(f"Iterations: {ITERATIONS}, Interval: {INTERVAL_SECONDS}s")
     print("Trading-hours filter: 8:30–15:00 Central, Mon–Fri.\n")
 

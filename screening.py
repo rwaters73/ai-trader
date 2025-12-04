@@ -696,7 +696,10 @@ def main() -> None:
                 f"(rel vol {r.relative_volume:.2f}x, "
                 f"ROC {r.extra_info['roc_pct']:.2f}%)"
             )
-            save_live_watchlist(passing)
+
+        # NEW: write just the symbols once
+        passing_symbols = [r.symbol for r in passing]
+        save_live_watchlist(passing_symbols)
     else:
         print("No symbols passed all pillars with the current settings.")
 

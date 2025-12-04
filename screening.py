@@ -489,6 +489,17 @@ def run_daily_backtest_for_symbol(
     except OSError as e:
         print(f"[Backtest-Daily] Failed to run backtest.py for {symbol}: {e}")
 
+def save_live_watchlist(symbols: list[str], path: str = "data/live_watchlist.txt") -> None:
+    """
+    Write symbols (one per line) to path. Creates parent directory if needed.
+    """
+    from pathlib import Path
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as fh:
+        for sym in symbols:
+            fh.write(f"{sym}\n")
 
 def run_intraday_backtest_for_symbol(
     symbol: str,
@@ -685,6 +696,7 @@ def main() -> None:
                 f"(rel vol {r.relative_volume:.2f}x, "
                 f"ROC {r.extra_info['roc_pct']:.2f}%)"
             )
+            save_live_watchlist(passing)
     else:
         print("No symbols passed all pillars with the current settings.")
 

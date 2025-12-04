@@ -1,2 +1,2 @@
-PillarCheckResult(symbol='PMI', latest_price=3.835, prev_close=2.01, today_volume=164133, avg_daily_volume=3023.705882352941, relative_volume=54.282065249109976, price_ok=True, roc_ok=True, rvol_ok=True, news_ok=True, float_ok=True, extra_info={'roc_pct': 90.79601990049753, 'num_recent_days': 17, 'news_count': 0, 'float_shares': None})
-PillarCheckResult(symbol='QCLS', latest_price=6.91, prev_close=4.65, today_volume=256921, avg_daily_volume=14832.588235294117, relative_volume=17.321386930209318, price_ok=True, roc_ok=True, rvol_ok=True, news_ok=True, float_ok=True, extra_info={'roc_pct': 48.6021505376344, 'num_recent_days': 17, 'news_count': 0, 'float_shares': None})
+TSLA
+GME

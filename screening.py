@@ -489,17 +489,21 @@ def run_daily_backtest_for_symbol(
     except OSError as e:
         print(f"[Backtest-Daily] Failed to run backtest.py for {symbol}: {e}")
 
-def save_live_watchlist(symbols: list[str], path: str = "data/live_watchlist.txt") -> None:
+def save_live_watchlist(symbols: List[str]) -> None:
     """
-    Write symbols (one per line) to path. Creates parent directory if needed.
+    Save a simple newline-delimited list of ticker symbols for live trading.
+    Each line in data/live_watchlist.txt will be something like:
+      TSLA
+      GME
+      PMI
     """
-    from pathlib import Path
-
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", encoding="utf-8") as fh:
-        for sym in symbols:
-            fh.write(f"{sym}\n")
+    with open(LIVE_WATCHLIST_PATH, "w") as file_handle:
+        for symbol in symbols:
+            symbol_str = symbol.strip()
+            if not symbol_str:
+                continue
+            file_handle.write(symbol_str + "\n")
+    print(f"✓ Wrote {len(symbols)} symbols to {LIVE_WATCHLIST_PATH}")
 
 def run_intraday_backtest_for_symbol(
     symbol: str,

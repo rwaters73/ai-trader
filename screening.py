@@ -18,6 +18,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetClass
 
+LIVE_WATCHLIST_PATH = os.path.join("data", "live_watchlist.txt")
 
 # ---------------------------------------------------------------------------
 # Credential + client helpers

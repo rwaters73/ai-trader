@@ -19,7 +19,7 @@ from regime import get_market_regime
 from models import TargetPosition  # you already import this somewhere, just make sure it is there
 
 from pathlib import Path
-from typing import list
+from typing import List
 
 def is_rth(now: datetime | None = None) -> bool:
     """

@@ -18,6 +18,8 @@ from eod_policy import apply_eod_policy
 from regime import get_market_regime
 from models import TargetPosition  # you already import this somewhere, just make sure it is there
 
+from pathlib import Path
+from typing import list
 
 def is_rth(now: datetime | None = None) -> bool:
     """
@@ -83,11 +85,42 @@ def is_eod_window(now: datetime | None = None) -> bool:
 
     return start <= minutes < end
 
+def load_symbols_for_trading(
+    watchlist_path: str = "data/live_watchlist.txt",
+    fallback_symbols: list[str] = None,
+) -> list[str]:
+    """
+    Load trading symbols from watchlist file if it exists, otherwise use fallback list.
+    """
+    if fallback_symbols is None:
+        fallback_symbols = SYMBOLS
+    
+    watchlist_file = Path(watchlist_path)
+    
+    if watchlist_file.exists():
+        try:
+            with watchlist_file.open("r", encoding="utf-8") as fh:
+                symbols = [line.strip().upper() for line in fh if line.strip()]
+            
+            if symbols:
+                print(f"✓ Loaded {len(symbols)} symbols from {watchlist_path}")
+                return symbols
+            else:
+                print(f"⚠ Watchlist file is empty; using fallback symbols")
+                return fallback_symbols
+        except Exception as e:
+            print(f"⚠ Error reading {watchlist_path}: {e}; using fallback symbols")
+            return fallback_symbols
+    else:
+        print(f"ℹ Watchlist file not found at {watchlist_path}; using fallback symbols")
+        return fallback_symbols
 
 
+def main(symbols: list[str] = None):
+    """Main trading logic."""
+    if symbols is None:
+        symbols = load_symbols_for_trading()
 
-
-def main():
     print(f"Starting bounded loop for symbols: {', '.join(SYMBOLS)}")
     print(f"Iterations: {ITERATIONS}, Interval: {INTERVAL_SECONDS}s")
     print("Trading-hours filter: 8:30–15:00 Central, Mon–Fri.\n")
@@ -123,7 +156,7 @@ def main():
                         cancel_all_open_orders()
                         eod_orders_canceled = True
 
-                for symbol in SYMBOLS:
+                for symbol in symbols:
                     state = build_symbol_state(symbol)
                     target = decide_target_position(state)
 
@@ -204,6 +237,9 @@ def main():
     finally:
         print("\nCompleted program. Exiting gracefully.\n")
 
-
+  
 if __name__ == "__main__":
-    main()
+    # Load symbols for trading
+    symbols_to_trade = load_symbols_for_trading()
+    # Use symbols_to_trade instead of hard-coded list
+    main(symbols_to_trade)

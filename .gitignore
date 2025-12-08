@@ -14,3 +14,8 @@ logs/
 
 # SQLite DB
 trading_log.db
+sqldiff.exe
+sqlite3.exe
+sqlite3_analyzer.exe
+sqlite3_rsync.exe
+

@@ -17,10 +17,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 from db import DB_PATH  # we already defined this in db.py
-
 
 # -----------------------------
 # Data structures
@@ -58,52 +57,84 @@ def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def load_filled_orders_from_db() -> List[sqlite3.Row]:
+def load_filled_orders_from_db() -> List[Dict[str, Any]]:
     """
-    Load all filled (or partially filled) orders from the `orders` table.
+    Load filled orders from the 'orders' table.
 
-    Assumes `orders` schema has at least:
-      - alpaca_order_id TEXT
-      - symbol TEXT
-      - side TEXT  ("buy" / "sell")
-      - qty REAL
-      - limit_price REAL
-      - status TEXT
-      - submitted_at TEXT (ISO string)
-      - filled_at TEXT (ISO string, may be NULL for some statuses)
+    Actual columns in the DB (from PRAGMA table_info):
+      id, timestamp, alpaca_order_id, symbol, side,
+      qty, order_type, time_in_force, status,
+      limit_price, stop_price
+
+    We expose a dict that looks similar to an Alpaca order:
+      - order_id        := alpaca_order_id (fallback to id if needed)
+      - symbol, side, qty, status, type, time_in_force
+      - submitted_at    := timestamp
+      - filled_at       := timestamp (we do not have a separate filled time)
+      - filled_avg_price := None (not stored in DB)
+      - limit_price, stop_price
     """
-    db_path = Path(DB_PATH)
-    if not db_path.exists():
-        print(f"[report] DB does not exist at {db_path}. No data to report.")
-        return []
-
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT
-                alpaca_order_id,
-                symbol,
-                side,
-                qty,
-                limit_price,
-                status,
-                submitted_at,
-                filled_at
-            FROM orders
-            WHERE status IN ('filled', 'partially_filled')
-            ORDER BY
-                COALESCE(filled_at, submitted_at)
-            """
+    cursor.execute(
+        """
+        SELECT
+            id,
+            timestamp,
+            alpaca_order_id,
+            symbol,
+            side,
+            qty,
+            order_type,
+            time_in_force,
+            status,
+            limit_price,
+            stop_price
+        FROM orders
+        WHERE status = 'filled'
+        """
+    )
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    orders: List[Dict[str, Any]] = []
+
+    for row in rows:
+        submitted_at = row["timestamp"]
+        filled_at = row["timestamp"]  # no separate filled time in the schema
+
+        alpaca_order_id = row["alpaca_order_id"]
+        internal_id = row["id"]
+
+        orders.append(
+            {
+                "order_id": alpaca_order_id or internal_id,
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "qty": float(row["qty"]),
+                "status": row["status"],
+
+                "type": row["order_type"],
+                "time_in_force": row["time_in_force"],
+
+                "submitted_at": submitted_at,
+                "filled_at": filled_at,
+
+                # Not stored in DB, but some downstream code may expect the key
+                "filled_avg_price": None,
+
+                "limit_price": float(row["limit_price"])
+                if row["limit_price"] is not None else None,
+
+                "stop_price": float(row["stop_price"])
+                if row["stop_price"] is not None else None,
+            }
         )
-        rows = cursor.fetchall()
-        print(f"[report] Loaded {len(rows)} filled/partial orders from DB.")
-        return rows
-    finally:
-        conn.close()
+
+    return orders
 
 
 def reconstruct_closed_trades(orders: List[sqlite3.Row]) -> List[ClosedTrade]:

@@ -1,0 +1,2 @@
+symbol,entry_date,exit_date,entry_price,exit_price,quantity,pnl_dollars,pnl_percent,holding_days
+WBUY,2025-12-01 05:00:00+00:00,2025-12-02 05:00:00+00:00,1.97,1.9305999999999999,50761.0,-1999.983400000005,-2.0000000000000053,1

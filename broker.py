@@ -12,6 +12,8 @@ from alpaca.trading.requests import (
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
+from daily_risk import can_open_new_trade, register_new_trade
+
 # Try to import StopOrderRequest; if not available in this alpaca-py version,
 # we'll skip placing real SL orders and just log a warning.
 try:
@@ -134,16 +136,35 @@ def submit_market_order(
     extended: bool = False,
 ):
     """
-    Submit a MARKET order. Returns the Alpaca order object or None
+    Submit a market order. Returns the Alpaca order object or None
     if quantity is non-positive.
+
+    For live trading, Alpaca requires whole-share quantities for
+    non-fractionable assets. Here we floor to an integer number of
+    shares before submitting.
     """
     if quantity <= 0:
         print(f"[WARN] Not placing MARKET order for {symbol}: non-positive quantity={quantity}")
         return None
 
+    # Coerce to whole shares for safety
+    normalized_quantity = int(quantity)
+    if normalized_quantity <= 0:
+        print(
+            f"[WARN] Not placing MARKET order for {symbol}: "
+            f"computed whole-share quantity={normalized_quantity} from {quantity}"
+        )
+        return None
+
+    if normalized_quantity != quantity:
+        print(
+            f"[INFO] Adjusting MARKET order quantity for {symbol} from "
+            f"{quantity:.4f} to whole shares={normalized_quantity}"
+        )
+
     order_request = MarketOrderRequest(
         symbol=symbol,
-        qty=quantity,  # Alpaca field name is 'qty'
+        qty=normalized_quantity,
         side=side,
         time_in_force=TimeInForce.DAY,
         extended_hours=extended,
@@ -151,7 +172,6 @@ def submit_market_order(
 
     order = _trading_client.submit_order(order_request)
 
-    # Log order submission to DB
     if order is not None:
         log_order_to_db(order)
 
@@ -179,19 +199,34 @@ def submit_limit_order(
     Submit a LIMIT order. Returns the Alpaca order object or None
     if quantity is non-positive.
 
-    We normalize limit_price to two decimal places to satisfy US equity
-    tick-size rules (no sub-penny prices).
+    We normalize limit_price to two decimal places and coerce the
+    quantity to whole shares so non-fractionable assets do not error.
     """
     if quantity <= 0:
         print(f"[WARN] Not placing LIMIT order for {symbol}: non-positive quantity={quantity}")
         return None
+
+    # Coerce to whole shares for safety
+    normalized_quantity = int(quantity)
+    if normalized_quantity <= 0:
+        print(
+            f"[WARN] Not placing LIMIT order for {symbol}: "
+            f"computed whole-share quantity={normalized_quantity} from {quantity}"
+        )
+        return None
+
+    if normalized_quantity != quantity:
+        print(
+            f"[INFO] Adjusting LIMIT order quantity for {symbol} from "
+            f"{quantity:.4f} to whole shares={normalized_quantity}"
+        )
 
     # Normalize limit price to cents (2 decimal places)
     normalized_limit_price = round(float(limit_price), 2)
 
     order_request = LimitOrderRequest(
         symbol=symbol,
-        qty=quantity,  # Alpaca field name is 'qty'
+        qty=normalized_quantity,
         side=side,
         limit_price=normalized_limit_price,
         time_in_force=TimeInForce.DAY,
@@ -282,138 +317,83 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
     to move from current position_qty to target_qty.
 
     Behavior:
-      - If no change in position is needed -> do nothing.
+      - If no change in position is needed → do nothing.
       - If moving from flat -> non-flat and target.entry_type == "limit"
-        and target.entry_limit_price is provided -> submit a LIMIT order.
-      - Otherwise -> submit a MARKET order.
+        and target.entry_limit_price is provided → submit a LIMIT order.
+      - Otherwise → submit a MARKET order.
       - Exits (reducing position) are currently always MARKET.
 
-    New: risk_limits integration
-      - For BUY orders that increase net long exposure, check risk_limits
-        before submitting the order. If the order would violate the
-        risk-limited account rules, we log a message and skip the order.
+    Now also integrates a simple daily circuit breaker via daily_risk:
+      - Limits the number of *new positions* opened per calendar day.
     """
-    current_quantity = state.position_qty
-    desired_quantity = target.target_qty
-    quantity_delta = desired_quantity - current_quantity
+    current = state.position_qty
+    desired = target.target_qty
+    delta = desired - current
 
-    print(f"{state.symbol}: current={current_quantity}, target={desired_quantity} | {target.reason}")
+    print(f"{state.symbol}: current={current}, target={desired} | {target.reason}")
 
     # No change needed
-    if abs(quantity_delta) < 1e-6:
+    if abs(delta) < 1e-6:
         print(f"{state.symbol}: No change in position. No order placed.")
         return
 
-    order_side = OrderSide.BUY if quantity_delta > 0 else OrderSide.SELL
-    order_quantity = abs(quantity_delta)
+    side = OrderSide.BUY if delta > 0 else OrderSide.SELL
+    quantity = abs(delta)
 
-    # Determine if this is an ENTRY (flat -> non-flat)
-    is_entry_from_flat = (abs(current_quantity) < 1e-6) and (desired_quantity > 0)
+    # Is this an ENTRY (flat -> non-flat, long only)?
+    is_entry_from_flat = (abs(current) < 1e-6) and (desired > 0)
 
-    # ------------------------------------------------------------------
-    # Risk check for new BUY exposure
-    # ------------------------------------------------------------------
-    is_new_long_exposure = is_entry_from_flat and (order_side is OrderSide.BUY)
-
-    if is_new_long_exposure:
-        # Estimate the entry price so we can estimate order cost.
-        # For a limit entry, use the proposed limit price.
-        # For a market entry, use the current ask, or bid as a fallback.
-        if target.entry_type.lower() == "limit" and target.entry_limit_price is not None:
-            estimated_price = float(target.entry_limit_price)
-        else:
-            if state.ask is not None and state.ask > 0:
-                estimated_price = float(state.ask)
-            elif state.bid is not None and state.bid > 0:
-                estimated_price = float(state.bid)
-            else:
-                estimated_price = 0.0
-
-        if estimated_price <= 0:
+    # --------------------------------------------------
+    # Daily risk circuit breaker for new entries
+    # --------------------------------------------------
+    if is_entry_from_flat:
+        allowed, reason = can_open_new_trade()
+        if not allowed:
             print(
-                f"[RISK] {state.symbol}: Could not estimate a positive entry price "
-                f"for risk check. Skipping risk_limits check and not placing order."
+                f"{state.symbol}: DAILY RISK HALT - {reason} "
+                f"Not opening new position."
             )
             return
 
-        estimated_order_cost = order_quantity * estimated_price
-
-        # Build risk context and ask whether we are allowed to open this position.
-        risk_context = build_risk_context(_trading_client)
-        risk_decision = can_open_new_position(risk_context, estimated_order_cost)
-
-        # risk_decision might be a bool or (bool, message)
-        if isinstance(risk_decision, tuple):
-            is_allowed = bool(risk_decision[0])
-            risk_message = str(risk_decision[1]) if len(risk_decision) > 1 else ""
-        else:
-            is_allowed = bool(risk_decision)
-            risk_message = ""
-
-        if not is_allowed:
-            detail = f" Reason: {risk_message}" if risk_message else ""
-            print(
-                f"[RISK] {state.symbol}: Blocked new BUY of approx cost "
-                f"{estimated_order_cost:.2f} by risk_limits.{detail}"
-            )
-
-            # NEW: Log blocked decision
-            log_risk_event_to_db(
-                symbol=state.symbol,
-                action="BLOCK_BUY",
-                cost=estimated_order_cost,
-                allowed=False,
-                message=risk_message
-            )
-
-            return
-        
-        print(
-            f"[RISK] {state.symbol}: New BUY of approx cost {estimated_order_cost:.2f} "
-            f"approved by risk_limits."
-        )
-        # NEW: Log approval
-        log_risk_event_to_db(
-            symbol=state.symbol,
-            action="ALLOW_BUY",
-            cost=estimated_order_cost,
-            allowed=True,
-            message=risk_message
-        )
-
-
-    # ------------------------------------------------------------------
-    # Submit the actual order
-    # ------------------------------------------------------------------
+    # --------------------------------------------------
+    # Place the appropriate order
+    # --------------------------------------------------
     if (
         is_entry_from_flat
         and target.entry_type.lower() == "limit"
         and target.entry_limit_price is not None
     ):
         print(
-            f"{state.symbol}: Submitting LIMIT {order_side.name} quantity={order_quantity} at "
+            f"{state.symbol}: Submitting LIMIT {side.name} quantity={quantity} at "
             f"{target.entry_limit_price:.2f} to reach target."
         )
         order = submit_limit_order(
             symbol=state.symbol,
-            quantity=order_quantity,
-            side=order_side,
+            quantity=quantity,
+            side=side,
             limit_price=target.entry_limit_price,
             extended=extended,
         )
     else:
         # For exits, adjustments, or entries without a valid limit price, use MARKET
-        print(f"{state.symbol}: Submitting MARKET {order_side.name} quantity={order_quantity} to reach target.")
+        print(f"{state.symbol}: Submitting MARKET {side.name} quantity={quantity} to reach target.")
         order = submit_market_order(
             symbol=state.symbol,
-            quantity=order_quantity,
-            side=order_side,
+            quantity=quantity,
+            side=side,
             extended=extended,
         )
+
+    # If this was a new entry and the order was successfully submitted,
+    # increment the daily trade count.
+    if is_entry_from_flat and order is not None:
+        register_new_trade()
+        print(f"{state.symbol}: Registered new trade for daily risk tracking.")
 
     if order is not None:
         print(f"{state.symbol}: Order submitted:")
         print(order)
+
 
 def compute_atr_for_symbol(
     symbol: str,

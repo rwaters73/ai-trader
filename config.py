@@ -7,6 +7,9 @@ ALPACA_API_KEY_ID = os.getenv("ALPACA_API_KEY_ID")
 ALPACA_API_SECRET_KEY = os.getenv("ALPACA_API_SECRET_KEY")
 ALPACA_PAPER_BASE_URL = os.getenv("ALPACA_PAPER_BASE_URL")  # not used directly yet but kept
 
+# Daily risk circuit breakers
+MAX_DAILY_TRADES_PER_DAY = 1  # total new positions you are allowed to open per trading day
+
 
 if not ALPACA_API_KEY_ID or not ALPACA_API_SECRET_KEY:
     raise RuntimeError("Alpaca API keys are missing. Check your .env file.")

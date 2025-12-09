@@ -1,7 +1,7 @@
 import pandas as pd
 
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
@@ -36,6 +36,7 @@ from config import (
     ATR_PERIOD_DEFAULT,
     ATR_MULTIPLIER_SL_DEFAULT,
     ATR_TP_MULTIPLIER_DEFAULT,
+    MAX_ENTRY_ORDER_AGE_MINUTES,
 )
 
 from risk_limits import build_risk_context, can_open_new_position
@@ -517,6 +518,79 @@ def cancel_all_open_orders() -> None:
             )
         except Exception as exception:
             print(f"[WARN] Failed to cancel order {order.id}: {exception}")
+
+def cancel_stale_entry_orders_for_symbol(
+    state: SymbolState,
+    max_age_minutes: int = MAX_ENTRY_ORDER_AGE_MINUTES,
+) -> None:
+    """
+    Cancel stale LIMIT BUY entry orders if:
+      - We are currently FLAT in this symbol (position_qty == 0).
+      - There is an open BUY order.
+      - The order has been open longer than max_age_minutes.
+
+    This prevents us from chasing an entry all day after price runs away.
+    Exit orders (SELL TP/SL) are not touched.
+    """
+    symbol = state.symbol
+
+    # Only worry about stale ENTRY orders when flat.
+    if abs(state.position_qty) > 1e-6:
+        return
+
+    try:
+        open_orders = get_open_orders_for_symbol(symbol)
+    except Exception as exc:
+        print(f"[WARN] {symbol}: Could not fetch open orders for stale-check: {exc}")
+        return
+
+    if not open_orders:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+
+    for order in open_orders:
+        try:
+            # Ignore non BUY orders here (we do not want to cancel TP/SL SELLs)
+            side_str = str(order.side).lower()
+            if not side_str.endswith("buy"):
+                continue
+
+            # Pick a timestamp for "age" measurement.
+            # Alpaca Order usually has created_at and submitted_at as datetimes.
+            created_at = getattr(order, "created_at", None) or getattr(order, "submitted_at", None)
+            if created_at is None:
+                # No reliable timestamp; skip this order
+                print(f"[WARN] {symbol}: Open BUY order {order.id} has no created_at/submitted_at; skipping age check.")
+                continue
+
+            # Ensure timezone-aware
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+
+            age_minutes = (now_utc - created_at).total_seconds() / 60.0
+
+            if age_minutes > max_age_minutes:
+                print(
+                    f"{symbol}: Cancelling STALE entry order {order.id} "
+                    f"(BUY, age={age_minutes:.1f} min > {max_age_minutes} min)."
+                )
+                _trading_client.cancel_order_by_id(order.id)
+
+                # Log cancel to DB
+                try:
+                    log_order_event_to_db(
+                        alpaca_order_id=str(order.id),
+                        event_type="canceled_stale_entry",
+                        filled_qty=float(order.filled_qty or 0),
+                        remaining_qty=float(order.qty) - float(order.filled_qty or 0),
+                        status="canceled",
+                    )
+                except Exception as log_exc:
+                    print(f"[WARN] Failed to log stale-cancel event for order {order.id}: {log_exc}")
+
+        except Exception as e:
+            print(f"[WARN] {symbol}: Error while checking stale entry order {getattr(order, 'id', 'unknown')}: {e}")
 
 
 def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) -> None:

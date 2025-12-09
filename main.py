@@ -10,6 +10,7 @@ from broker import (
     cancel_all_open_orders,
     get_position_info,
     ensure_exit_orders_for_symbol,
+    cancel_stale_entry_orders_for_symbol,
 )
 from models import SymbolState
 from strategy import decide_target_position
@@ -20,6 +21,8 @@ from models import TargetPosition  # you already import this somewhere, just mak
 
 from pathlib import Path
 from typing import List
+
+from circuit_breakers import has_hit_daily_loss_limit
 
 def is_rth(now: datetime | None = None) -> bool:
     """
@@ -156,8 +159,41 @@ def main(symbols: list[str] = None):
                         cancel_all_open_orders()
                         eod_orders_canceled = True
 
+                    # -------------------------------------------------
+                    # Circuit breaker: daily loss limit
+                    # -------------------------------------------------
+                    hit_limit, cb_message = has_hit_daily_loss_limit()
+                    print(cb_message)
+    
+                    if hit_limit:
+                        print("Completed program. Exiting gracefully due to daily loss limit.")
+                        return
+                    try:
+                        result = has_hit_daily_loss_limit()
+                        if isinstance(result, tuple):
+                            hit_limit = bool(result[0])
+                            cb_message = str(result[1]) if len(result) > 1 else ""
+                        else:
+                            hit_limit = bool(result)
+                            cb_message = ""
+                    except Exception as exc:
+                        print(f"Circuit-breaker check failed: {exc}")
+                        hit_limit = False
+                        cb_message = ""
+    
+                    if cb_message:
+                        print(cb_message)
+    
+                    if hit_limit:
+                        print("Completed program. Exiting gracefully due to daily loss limit.")
+                        return
+    
                 for symbol in symbols:
                     state = build_symbol_state(symbol)
+                    
+                    # Cancel stale entry limit orders if we are flat and the order is too old.
+                    cancel_stale_entry_orders_for_symbol(state)
+
                     target = decide_target_position(state)
 
                     if in_eod:

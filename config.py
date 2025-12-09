@@ -10,6 +10,22 @@ ALPACA_PAPER_BASE_URL = os.getenv("ALPACA_PAPER_BASE_URL")  # not used directly 
 # Daily risk circuit breakers
 MAX_DAILY_TRADES_PER_DAY = 1  # total new positions you are allowed to open per trading day
 
+# =========================
+# Live trading circuit breakers
+# =========================
+
+# Hard daily loss limit in dollars (based on Alpaca account equity vs last_equity)
+# If today's PnL <= -MAX_DAILY_LOSS_DOLLARS, the bot will stop trading for the day.
+MAX_DAILY_LOSS_DOLLARS = 200.0  # tune this to your comfort level
+
+# =========================
+# Order management / circuit breakers
+# =========================
+
+# How long we allow an entry LIMIT order to sit unfilled (in minutes)
+# before we cancel it and stop chasing that entry.
+MAX_ENTRY_ORDER_AGE_MINUTES = 15
+
 
 if not ALPACA_API_KEY_ID or not ALPACA_API_SECRET_KEY:
     raise RuntimeError("Alpaca API keys are missing. Check your .env file.")

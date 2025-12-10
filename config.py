@@ -10,6 +10,15 @@ ALPACA_PAPER_BASE_URL = os.getenv("ALPACA_PAPER_BASE_URL")  # not used directly 
 # Daily risk circuit breakers
 MAX_DAILY_TRADES_PER_DAY = 10  # total new positions you are allowed to open per trading day
 
+# --- Portfolio exposure limits ---
+# Maximum number of simultaneously open positions (long or short).
+MAX_OPEN_POSITIONS: int = 3
+
+# Maximum fraction of total equity that can be allocated to a single symbol.
+# Example: 0.3 = 30% of account equity.
+MAX_CAPITAL_PER_SYMBOL_FRACTION: float = 0.30
+
+
 # =========================
 # Live trading circuit breakers
 # =========================

@@ -20,6 +20,38 @@ _trading_client = TradingClient(
     paper=True,
 )
 
+# Support both alpaca-py and alpaca-trade-api: try the new package first, fall back to the old one.
+_ALPACA_PY = False
+_OLD_ALPACA = False
+try:
+    # new official SDK (alpaca-py)
+    from alpaca.trading.requests import GetAccountRequest
+    from alpaca.trading.client import TradingClient
+    _ALPACA_PY = True
+except Exception:
+    try:
+        # older/alternate SDK
+        from alpaca_trade_api.rest import REST as AlpacaREST
+        _OLD_ALPACA = True
+    except Exception:
+        AlpacaREST = None
+
+def _get_account_equity_from_client(client) -> float:
+    """
+    Return account equity (float) using whichever client is available.
+    - If using alpaca-py: pass a TradingClient instance and this uses GetAccountRequest().
+    - If using alpaca-trade-api: pass an AlpacaREST instance and this calls get_account().
+    """
+    if _ALPACA_PY:
+        req = GetAccountRequest()
+        acct = client.get_account(req)
+        return float(acct.equity)
+    if _OLD_ALPACA:
+        acct = client.get_account()
+        # alpaca-trade-api Account has an 'equity' attribute (string)
+        return float(getattr(acct, "equity", getattr(acct, "cash", 0.0)))
+    raise RuntimeError("No compatible Alpaca SDK found. Install 'alpaca-py' or 'alpaca-trade-api' in the venv.")
+
 
 def get_daily_pnl_dollars() -> float:
     """

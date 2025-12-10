@@ -1,114 +1,82 @@
-from __future__ import annotations
+"""
+circuit_breakers.py
 
-from typing import Tuple
+Simple daily loss circuit breaker for live trading.
+
+Uses Alpaca's TradingClient to read current account equity and compares it
+to the equity at the start of the session.
+
+If the loss in dollars or percent crosses configured thresholds, we signal
+that trading should stop for the day.
+"""
+
+from typing import Optional
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetAccountRequest  # imported for completeness, not strictly needed
 
 from config import (
     ALPACA_API_KEY_ID,
     ALPACA_API_SECRET_KEY,
+    #DAILY_LOSS_LIMIT_DOLLARS,
+    #DAILY_LOSS_LIMIT_PERCENT,
     MAX_DAILY_LOSS_DOLLARS,
+    MAX_DAILY_LOSS_PERCENT,
 )
 
-
-# One dedicated trading client for circuit breaker checks.
-# This keeps the module self-contained and avoids importing from broker.
+# One shared trading client for this module
 _trading_client = TradingClient(
     ALPACA_API_KEY_ID,
     ALPACA_API_SECRET_KEY,
     paper=True,
 )
 
-# Support both alpaca-py and alpaca-trade-api: try the new package first, fall back to the old one.
-_ALPACA_PY = False
-_OLD_ALPACA = False
-try:
-    # new official SDK (alpaca-py)
-    from alpaca.trading.requests import GetAccountRequest
-    from alpaca.trading.client import TradingClient
-    _ALPACA_PY = True
-except Exception:
-    try:
-        # older/alternate SDK
-        from alpaca_trade_api.rest import REST as AlpacaREST
-        _OLD_ALPACA = True
-    except Exception:
-        AlpacaREST = None
 
-def _get_account_equity_from_client(client) -> float:
+def get_current_equity() -> float:
     """
-    Return account equity (float) using whichever client is available.
-    - If using alpaca-py: pass a TradingClient instance and this uses GetAccountRequest().
-    - If using alpaca-trade-api: pass an AlpacaREST instance and this calls get_account().
-    """
-    if _ALPACA_PY:
-        req = GetAccountRequest()
-        acct = client.get_account(req)
-        return float(acct.equity)
-    if _OLD_ALPACA:
-        acct = client.get_account()
-        # alpaca-trade-api Account has an 'equity' attribute (string)
-        return float(getattr(acct, "equity", getattr(acct, "cash", 0.0)))
-    raise RuntimeError("No compatible Alpaca SDK found. Install 'alpaca-py' or 'alpaca-trade-api' in the venv.")
-
-
-def get_daily_pnl_dollars() -> float:
-    """
-    Compute *today's* realized+unrealized PnL in dollars, based on Alpaca account fields.
-
-    Alpaca's TradingAccount object has:
-      - equity: current total equity
-      - last_equity: prior session's equity
-
-    A simple approximation for today's PnL is:
-        daily_pnl = equity - last_equity
+    Fetch the current account equity from Alpaca as a float.
     """
     account = _trading_client.get_account()
-
-    # These are strings in Alpaca's response; cast to float.
-    equity = float(account.equity)
-    last_equity = float(account.last_equity)
-
-    daily_pnl = equity - last_equity
-    return daily_pnl
+    return float(account.equity)
 
 
-def has_hit_daily_loss_limit() -> Tuple[bool, str]:
+def has_hit_daily_loss_limit(session_start_equity: float) -> bool:
     """
-    Check whether today's PnL is below the configured daily loss limit.
+    Return True if today's loss exceeds either:
 
-    Returns:
-        (hit_limit, message)
-        - hit_limit: True if we should stop trading for the day.
-        - message: human-readable explanation.
+      - DAILY_LOSS_LIMIT_DOLLARS (absolute dollars), or
+      - DAILY_LOSS_LIMIT_PERCENT (percent of session_start_equity)
+
+    session_start_equity is the equity at the time your bot started running
+    for the day. main.py should capture that once and pass it here.
     """
-    try:
-        daily_pnl = get_daily_pnl_dollars()
-    except Exception as exc:
-        # If we cannot fetch the account for some reason, fail safe:
-        # allow trading but log the issue.
-        return (
-            False,
-            f"[CIRCUIT] Could not compute daily PnL (exception: {exc}). "
-            f"Proceeding without daily-loss enforcement.",
-        )
+    current_equity = get_current_equity()
+    equity_change = current_equity - session_start_equity
 
-    loss_limit = -abs(MAX_DAILY_LOSS_DOLLARS)
+    # If we are not down, then no circuit breaker.
+    if equity_change >= 0:
+        return False
 
-    if daily_pnl <= loss_limit:
-        return (
-            True,
-            (
-                f"[CIRCUIT] Daily loss limit reached: PnL={daily_pnl:.2f} "
-                f"<= {loss_limit:.2f}. Halting trading for the rest of the day."
-            ),
+    loss_dollars = -equity_change
+
+    # 1) Check dollar loss limit
+    if MAX_DAILY_LOSS_DOLLARS is not None and loss_dollars >= MAX_DAILY_LOSS_DOLLARS:
+        print(
+            f"[circuit] Daily dollar loss limit hit. "
+            f"Loss={loss_dollars:.2f}, limit={MAX_DAILY_LOSS_DOLLARS:.2f}"
         )
-    else:
-        return (
-            False,
-            (
-                f"[CIRCUIT] Daily PnL OK: {daily_pnl:.2f} vs limit {loss_limit:.2f}. "
-                f"Continuing to trade."
-            ),
-        )
+        return True
+
+    # 2) Check percent loss limit
+    if (
+        MAX_DAILY_LOSS_PERCENT is not None
+        and session_start_equity > 0
+    ):
+        loss_percent = loss_dollars / session_start_equity * 100.0
+        if loss_percent >= MAX_DAILY_LOSS_PERCENT:
+            print(
+                f"[circuit] Daily percent loss limit hit. "
+                f"Loss={loss_percent:.2f}%, limit={MAX_DAILY_LOSS_PERCENT:.2f}%"
+            )
+            return True
+
+    return False

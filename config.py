@@ -17,6 +17,7 @@ MAX_DAILY_TRADES_PER_DAY = 10  # total new positions you are allowed to open per
 # Hard daily loss limit in dollars (based on Alpaca account equity vs last_equity)
 # If today's PnL <= -MAX_DAILY_LOSS_DOLLARS, the bot will stop trading for the day.
 MAX_DAILY_LOSS_DOLLARS = 200.0  # tune this to your comfort level
+MAX_DAILY_LOSS_PERCENT = 5.0
 
 # =========================
 # Order management / circuit breakers

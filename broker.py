@@ -277,36 +277,57 @@ def submit_stop_loss_order(
 
     if StopOrderRequest is None:
         print(
-            f"[WARN] alpaca.trading.requests.StopOrderRequest not available in this "
-            f"alpaca-py version; skipping SL order for {symbol} at {stop_price:.2f}."
+            "[WARN] alpaca.trading.requests.StopOrderRequest not available in this "
+            f"alpaca-py version; skipping SL order for {symbol} at {stop_price:.4f}."
         )
         return None
 
+    # Coerce to whole shares for safety (consistent with other submit_* helpers)
+    normalized_quantity = int(quantity)
+    if normalized_quantity <= 0:
+        print(
+            f"[WARN] Not placing STOP order for {symbol}: "
+            f"computed whole-share quantity={normalized_quantity} from {quantity}"
+        )
+        return None
+
+    if normalized_quantity != quantity:
+        print(
+            f"[INFO] Adjusting STOP order quantity for {symbol} from "
+            f"{quantity:.4f} to whole shares={normalized_quantity}"
+        )
+
+    # Normalize stop price to cents (2 decimal places) to satisfy tick size rules
+    normalized_stop_price = round(float(stop_price), 2)
+
     order_request = StopOrderRequest(
         symbol=symbol,
-        qty=quantity,  # Alpaca field name is 'qty'
+        qty=normalized_quantity,
         side=OrderSide.SELL,
         time_in_force=TimeInForce.DAY,
-        stop_price=stop_price,
+        stop_price=normalized_stop_price,
         extended_hours=extended,
     )
 
-    order = _trading_client.submit_order(order_request)
+    try:
+        order = _trading_client.submit_order(order_request)
+    except Exception as exc:
+        print(f"[ERROR] Failed to submit STOP order for {symbol}: {exc}")
+        return None
 
     if order is not None:
         log_order_to_db(order)
 
-        if order.filled_at is not None:
+        if getattr(order, "filled_at", None) is not None:
             log_order_event_to_db(
                 alpaca_order_id=str(order.id),
                 event_type="filled",
-                filled_qty=float(order.filled_qty or 0),
-                remaining_qty=float(order.qty) - float(order.filled_qty or 0),
-                status=str(order.status),
+                filled_qty=float(getattr(order, "filled_qty", 0) or 0),
+                remaining_qty=float(getattr(order, "qty", 0)) - float(getattr(order, "filled_qty", 0) or 0),
+                status=str(getattr(order, "status", "")),
             )
 
     return order
-
 
 # ---------------------------------------------------------------------------
 # Position reconciliation and flatten helpers

@@ -617,16 +617,17 @@ def cancel_stale_entry_orders_for_symbol(
 def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) -> None:
     """
     If we hold a long position in this symbol and there are no SELL exit orders
-    already open, create ATR-based take-profit and stop-loss exits.
+    already open, create an ATR-based stop-loss (and log the intended TP).
 
     Behavior:
       - Only handles LONG positions (position_qty > 0).
       - Uses ATR to compute SL and TP:
-            SL  = avg_entry_price - ATR_SL_MULTIPLIER_DEFAULT * ATR
+            SL  = avg_entry_price - ATR_MULTIPLIER_SL_DEFAULT * ATR
             TP  = avg_entry_price + ATR_TP_MULTIPLIER_DEFAULT * ATR
       - If ATR cannot be computed for any reason, falls back to
         percentage-based exits from BRACKET_TP_PERCENT_BY_SYMBOL and
         BRACKET_SL_PERCENT_BY_SYMBOL.
+      - Only a single SELL stop-loss order is submitted via submit_stop_loss_order.
     """
     symbol = state.symbol
     position_quantity = state.position_qty
@@ -680,25 +681,13 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
             f"SL={stop_loss_price:.2f} (-{stop_loss_percent}%)."
         )
 
+    # Log intended TP and SL, but submit only a single STOP order (SL).
     print(
-        f"{symbol}: Creating TP LIMIT at {take_profit_price:.2f} "
-        f"and SL STOP at {stop_loss_price:.2f} for quantity={position_quantity}."
+        f"{symbol}: Intended TP={take_profit_price:.2f}, submitting SL STOP at {stop_loss_price:.2f} "
+        f"for quantity={position_quantity}."
     )
 
-    # --- Create TP LIMIT SELL order ---
-    take_profit_order = submit_limit_order(
-        symbol=symbol,
-        quantity=position_quantity,
-        side=OrderSide.SELL,
-        limit_price=take_profit_price,
-        extended=extended,
-    )
-
-    if take_profit_order is not None:
-        print(f"{symbol}: TP LIMIT order submitted:")
-        print(take_profit_order)
-
-    # --- Stop-loss order (if supported) ---
+    # Submit only the STOP order via the shared helper.
     stop_loss_order = submit_stop_loss_order(
         symbol=symbol,
         quantity=position_quantity,

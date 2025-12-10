@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from alpaca.trading.client import TradingClient
+from config import MAX_OPEN_POSITIONS, MAX_CAPITAL_PER_SYMBOL_FRACTION
 
 # ---------------------------------------------------------------------------
 # Configurable risk rules
@@ -141,3 +142,94 @@ def compute_risk_based_position_size(
     # We’ll round down to whole shares for now.
     buy_quantity = int(buy_quantity)
     return float(buy_quantity)
+
+@dataclass
+class PortfolioExposureContext:
+    """
+    Snapshot of current portfolio positions and notional values.
+    """
+    total_equity: float
+    open_positions_count: int
+    per_symbol_notional: dict[str, float]
+
+
+def build_portfolio_exposure_context(trading_client: TradingClient) -> PortfolioExposureContext:
+    """
+    Query all open positions from Alpaca and build a PortfolioExposureContext.
+
+    Returns:
+      - total_equity: sum of market_value across all positions
+      - open_positions_count: number of positions with qty != 0
+      - per_symbol_notional: dict mapping symbol → market_value
+    """
+    positions = trading_client.get_all_positions()
+
+    total_equity = 0.0
+    per_symbol_notional: dict[str, float] = {}
+    open_positions_count = 0
+
+    for position in positions:
+        symbol = position.symbol
+        market_value = float(position.market_value) if position.market_value is not None else 0.0
+        qty = float(position.qty) if position.qty is not None else 0.0
+
+        # Only count positions with nonzero qty
+        if qty != 0:
+            total_equity += market_value
+            per_symbol_notional[symbol] = market_value
+            open_positions_count += 1
+
+    return PortfolioExposureContext(
+        total_equity=total_equity,
+        open_positions_count=open_positions_count,
+        per_symbol_notional=per_symbol_notional,
+    )
+
+def can_open_new_position_with_portfolio_caps(
+    symbol: str,
+    order_notional: float,
+    portfolio_ctx: PortfolioExposureContext,
+) -> bool:
+    """
+    Check if we can open a new position in `symbol` given portfolio exposure caps.
+
+    Rules:
+      1) If symbol is not already open, we can only open if:
+         portfolio_ctx.open_positions_count < MAX_OPEN_POSITIONS
+      2) The notional value after this trade must not exceed the per-symbol cap:
+         (current_symbol_notional + order_notional) <= MAX_CAPITAL_PER_SYMBOL_FRACTION * total_equity
+
+    Args:
+      - symbol: the ticker we want to trade
+      - order_notional: the notional value (cost) of the order we want to place
+      - portfolio_ctx: snapshot of current positions and equity
+
+    Returns:
+      - True if both constraints are satisfied; False otherwise.
+    """
+    current_symbol_notional = portfolio_ctx.per_symbol_notional.get(symbol, 0.0)
+    is_symbol_already_open = current_symbol_notional > 0
+
+    # Check max open positions constraint
+    if not is_symbol_already_open:
+        if portfolio_ctx.open_positions_count >= MAX_OPEN_POSITIONS:
+            print(
+                f"[RISK] Cannot open {symbol}: "
+                f"already at max open positions ({portfolio_ctx.open_positions_count} >= {MAX_OPEN_POSITIONS})."
+            )
+            return False
+
+    # Check per-symbol notional cap
+    total_equity = max(portfolio_ctx.total_equity, 1.0)  # Avoid division by zero
+    max_notional_per_symbol = MAX_CAPITAL_PER_SYMBOL_FRACTION * total_equity
+    projected_symbol_notional = current_symbol_notional + order_notional
+
+    if projected_symbol_notional > max_notional_per_symbol:
+        print(
+            f"[RISK] Cannot open {symbol}: "
+            f"projected notional ({projected_symbol_notional:.2f}) exceeds cap "
+            f"({max_notional_per_symbol:.2f} = {MAX_CAPITAL_PER_SYMBOL_FRACTION * 100:.1f}% of ${total_equity:.2f})."
+        )
+        return False
+
+    return True

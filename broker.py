@@ -37,9 +37,15 @@ from config import (
     ATR_MULTIPLIER_SL_DEFAULT,
     ATR_TP_MULTIPLIER_DEFAULT,
     MAX_ENTRY_ORDER_AGE_MINUTES,
+    RISK_LIMITED_STARTING_CASH,
 )
 
-from risk_limits import build_risk_context, can_open_new_position
+from risk_limits import (
+    build_risk_context, 
+    can_open_new_position,
+    build_portfolio_exposure_context, 
+    can_open_new_position_with_portfolio_caps,
+)
 
 # One shared trading client for the process
 _trading_client = TradingClient(
@@ -380,15 +386,26 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
     # --------------------------------------------------
     # Place the appropriate order
     # --------------------------------------------------
-    if (
-        is_entry_from_flat
-        and target.entry_type.lower() == "limit"
-        and target.entry_limit_price is not None
-    ):
+    if is_entry_from_flat and target.entry_type.lower() == "limit" and target.entry_limit_price is not None:
+        # --- Portfolio exposure gate ---
+        # Approximate order notional: quantity * entry limit price
+        order_notional = float(quantity) * float(target.entry_limit_price)
+
+        portfolio_ctx = build_portfolio_exposure_context(_trading_client)
+
+        if not can_open_new_position_with_portfolio_caps(
+            symbol=state.symbol,
+            order_notional=order_notional,
+            portfolio_ctx=portfolio_ctx,
+        ):
+            print(f"{state.symbol}: Portfolio caps blocked new entry. No order placed.")
+            return
+
         print(
             f"{state.symbol}: Submitting LIMIT {side.name} quantity={quantity} at "
             f"{target.entry_limit_price:.2f} to reach target."
-        )
+        )        
+        
         order = submit_limit_order(
             symbol=state.symbol,
             quantity=quantity,

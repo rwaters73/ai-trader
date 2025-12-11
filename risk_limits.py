@@ -155,16 +155,24 @@ class PortfolioExposureContext:
 
 def build_portfolio_exposure_context(trading_client: TradingClient) -> PortfolioExposureContext:
     """
-    Query all open positions from Alpaca and build a PortfolioExposureContext.
+    Build a PortfolioExposureContext using *account equity* as the base,
+    and per-symbol notionals from open positions.
 
-    Returns:
-      - total_equity: sum of market_value across all positions
-      - open_positions_count: number of positions with qty != 0
-      - per_symbol_notional: dict mapping symbol → market_value
+    total_equity:
+        - primary source: account.equity reported by Alpaca
+        - fallback: sum of open position market values if equity is missing/zero
+
+    This avoids the “total_equity ~= a few dollars” issue when you only
+    have tiny positions open.
     """
+    # 1) Get full account equity from Alpaca
+    account = trading_client.get_account()
+    account_equity = float(getattr(account, "equity", 0.0) or 0.0)
+
+    # 2) Get all open positions and compute per-symbol notionals
     positions = trading_client.get_all_positions()
 
-    total_equity = 0.0
+    positions_notional_sum = 0.0
     per_symbol_notional: dict[str, float] = {}
     open_positions_count = 0
 
@@ -173,11 +181,17 @@ def build_portfolio_exposure_context(trading_client: TradingClient) -> Portfolio
         market_value = float(position.market_value) if position.market_value is not None else 0.0
         qty = float(position.qty) if position.qty is not None else 0.0
 
-        # Only count positions with nonzero qty
         if qty != 0:
-            total_equity += market_value
+            positions_notional_sum += market_value
             per_symbol_notional[symbol] = market_value
             open_positions_count += 1
+
+    # 3) Choose a sensible total_equity:
+    #    normally account_equity (cash + positions); fall back to positions sum.
+    if account_equity > 0:
+        total_equity = account_equity
+    else:
+        total_equity = positions_notional_sum
 
     return PortfolioExposureContext(
         total_equity=total_equity,

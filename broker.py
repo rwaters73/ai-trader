@@ -1,4 +1,5 @@
 import pandas as pd
+import math
 
 from typing import Optional
 from datetime import datetime, timezone

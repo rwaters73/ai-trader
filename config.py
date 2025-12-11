@@ -8,7 +8,7 @@ ALPACA_API_SECRET_KEY = os.getenv("ALPACA_API_SECRET_KEY")
 ALPACA_PAPER_BASE_URL = os.getenv("ALPACA_PAPER_BASE_URL")  # not used directly yet but kept
 
 # Daily risk circuit breakers
-MAX_DAILY_TRADES_PER_DAY = 10  # total new positions you are allowed to open per trading day
+MAX_DAILY_TRADES_PER_DAY = 1  # total new positions you are allowed to open per trading day
 
 # --- Portfolio exposure limits ---
 # Maximum number of simultaneously open positions (long or short).

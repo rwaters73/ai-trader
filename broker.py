@@ -27,7 +27,6 @@ try:
 except ImportError:
     StopOrderRequest = None  # type: ignore
 
-import logger  # for logger.warning(), logger.debug(), etc.
 from logger import log_order  # CSV order log (still available if we want it)
 from data import get_latest_quote, get_recent_history, get_intraday_history
 from models import SymbolState, TargetPosition
@@ -552,19 +551,12 @@ def compute_intraday_atr_for_symbol(
     )
 
     if intraday_df is None or intraday_df.empty:
-        logger.warning(
-            "ATR intraday: no intraday bars for %s; cannot compute ATR.",
-            symbol,
-        )
+        print(f"[ATR] Intraday: no intraday bars for {symbol}; cannot compute ATR.")
         return None
 
     if len(intraday_df) < atr_period + 1:
-        logger.warning(
-            "ATR intraday: not enough bars for %s: have %d, need at least %d.",
-            symbol,
-            len(intraday_df),
-            atr_period + 1,
-        )
+        print(
+            f"[ATR] Intraday: not enough bars for {symbol}: have {len(intraday_df)}, need at least {atr_period + 1}.")
         return None
 
     # Make sure we are working with floats
@@ -592,20 +584,11 @@ def compute_intraday_atr_for_symbol(
     latest_atr = float(df["atr"].iloc[-1])
 
     if not math.isfinite(latest_atr) or latest_atr <= 0:
-        logger.warning(
-            "ATR intraday: last ATR value invalid for %s: %s",
-            symbol,
-            latest_atr,
-        )
+        print(f"[ATR] Intraday: last ATR value invalid for {symbol}: {latest_atr}")
         return None
 
-    logger.debug(
-        "ATR intraday: latest ATR for %s over %d bars (lookback %d min, bar %d min) is %.4f",
-        symbol,
-        atr_period,
-        INTRADAY_LOOKBACK_MINUTES,
-        INTRADAY_BAR_SIZE_MINUTES,
-        latest_atr,
+    print(
+        f"[ATR DEBUG] Latest ATR for {symbol} over {atr_period} bars (lookback {INTRADAY_LOOKBACK_MINUTES} min, bar {INTRADAY_BAR_SIZE_MINUTES} min) is {latest_atr:.4f}"
     )
 
     return latest_atr
@@ -795,13 +778,13 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
         atr_value = compute_atr_for_symbol(symbol)
     
     if atr_value is None:
-        logger.warning(f"{symbol}: ATR (intraday and daily) not available; skipping exit order creation.")
+        print(f"[ATR] {symbol}: ATR (intraday and daily) not available; skipping exit order creation.")
         return
 
     # Use bid or ask as the current price
     last_price = state.bid if state.bid and state.bid > 0 else state.ask
     if last_price is None or last_price <= 0:
-        logger.warning(f"{symbol}: No valid bid/ask price; skipping exit order creation.")
+        print(f"[ATR] {symbol}: No valid bid/ask price; skipping exit order creation.")
         return
 
     # Compute stop-loss price only

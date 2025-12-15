@@ -17,12 +17,16 @@ from config import (
     MAX_INTRADAY_PULLBACK_PCT,
     MIN_INTRADAY_BARS_FOR_CONFIRMATION,
     RISK_R_PER_TRADE_DEFAULT,
+    ATR_PERIOD_DEFAULT,
+    ATR_TRAILING_MULT_DEFAULT,
+    ATR_LOCK_IN_PROFIT_AFTER_R,
 )
 
 RISK_R_PER_TRADE_DEFAULT = 1.0  # how many "R" per trade
 MAX_RISK_FRACTION_PER_TRADE = 0.01  # 1% of starting cash per trade
 
 from signals import compute_recent_high_breakout_signal, EntrySignal
+from indicators import compute_atr_series
 
 from risk_limits import (
     compute_risk_based_position_size,
@@ -213,6 +217,8 @@ def simulate_backtest_for_symbol_with_intraday(
     current_entry_date: Optional[pd.Timestamp] = None
     current_take_profit_price: Optional[float] = None
     current_stop_loss_price: Optional[float] = None
+    highest_close_since_entry: Optional[float] = None
+    initial_stop_loss_price: Optional[float] = None
 
     executed_trades: List[BacktestTrade] = []
 
@@ -288,6 +294,10 @@ def simulate_backtest_for_symbol_with_intraday(
             )
             current_stop_loss_price = stop_loss_price
 
+            # Initialize trailing-stop tracking
+            highest_close_since_entry = entry_price
+            initial_stop_loss_price = stop_loss_price
+
             cash_balance -= required_cash
 
         # ------------------------------------------------------
@@ -305,15 +315,54 @@ def simulate_backtest_for_symbol_with_intraday(
 
             exit_price: Optional[float] = None
 
+            # Update highest close since entry
+            if highest_close_since_entry is None:
+                highest_close_since_entry = current_entry_price
+            highest_close_since_entry = max(highest_close_since_entry, close_price)
+
+            # Compute ATR from intraday bars for the same calendar date
+            atr_value: Optional[float] = None
+            try:
+                intraday_df = intraday_bars_dataframe.copy()
+                intraday_df["date_only"] = intraday_df["timestamp"].dt.date
+                target_date = current_timestamp.date()
+                intraday_slice_for_day = intraday_df[intraday_df["date_only"] == target_date]
+
+                if not intraday_slice_for_day.empty:
+                    atr_series = compute_atr_series(intraday_slice_for_day, ATR_PERIOD_DEFAULT)
+                    last_atr = atr_series.iloc[-1]
+                    if not pd.isna(last_atr):
+                        atr_value = float(last_atr)
+            except Exception:
+                atr_value = None
+
+            # Update trailing stop using ATR if available
+            if atr_value is not None:
+                candidate_stop = highest_close_since_entry - ATR_TRAILING_MULT_DEFAULT * atr_value
+
+                # Only move the stop up (never down)
+                current_stop_loss_price = max(current_stop_loss_price, candidate_stop)
+
+                # Allow stop to be moved up to at least entry price once we've locked in enough R
+                if initial_stop_loss_price is not None:
+                    initial_r = current_entry_price - initial_stop_loss_price
+                    if initial_r > 0:
+                        unrealized_profit_per_share = close_price - current_entry_price
+                        profit_in_r = unrealized_profit_per_share / initial_r
+                        if profit_in_r >= ATR_LOCK_IN_PROFIT_AFTER_R:
+                            current_stop_loss_price = max(current_stop_loss_price, current_entry_price)
+
+            # Stop-loss first
             if low_price <= current_stop_loss_price:
                 exit_price = current_stop_loss_price
+            # Then take-profit
             elif high_price >= current_take_profit_price:
                 exit_price = current_take_profit_price
             else:
+                # Time-based exit: holding too long?
                 holding_days = (current_timestamp - current_entry_date).days
                 if holding_days >= MAX_HOLDING_DAYS:
                     exit_price = close_price
-
             if exit_price is not None:
                 gross_proceeds = current_position_quantity * exit_price
                 cash_balance += gross_proceeds
@@ -347,6 +396,7 @@ def simulate_backtest_for_symbol_with_intraday(
                 current_entry_date = None
                 current_take_profit_price = None
                 current_stop_loss_price = None
+                highest_close_since_entry: Optional[float] = None
 
         bar_index += 1
 

@@ -137,6 +137,10 @@ ATR_SMA_ENTRY_PERIOD_DEFAULT = 20
 # How far above the SMA the close must be (e.g. 0.5% above)
 ATR_SMA_ENTRY_TOLERANCE_PCT = 0.5
 
+# ATR / trailing-stop configuration
+ATR_TRAILING_MULT_DEFAULT = 1.0  # how many ATRs below the highest close to place trailing stop
+ATR_LOCK_IN_PROFIT_AFTER_R = 1.0  # after how many R of profit we allow stop >= entry
+
 # Fraction of capital to risk per trade in backtests
 # Example: 0.01 means risk 1 percent of current cash per trade
 RISK_R_PER_TRADE_DEFAULT = 0.01

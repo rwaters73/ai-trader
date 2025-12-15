@@ -19,6 +19,8 @@ from config import (
     ATR_TP_MULTIPLIER_DEFAULT,
     ATR_STOP_MULTIPLIER_DEFAULT,
     RISK_R_PER_TRADE_DEFAULT,
+    ATR_TRAILING_MULT_DEFAULT,
+    ATR_LOCK_IN_PROFIT_AFTER_R,
 )
 
 from risk_sizing import compute_risk_based_position_size
@@ -75,8 +77,9 @@ ATR_LOOKBACK_DAYS = 14          # standard ATR period
 #ATR_STOP_MULTIPLIER = 1.5       # stop-loss = entry_price - 1.5 * ATR
 #ATR_TP_MULTIPLIER = 3.0         # take-profit = entry_price + 3.0 * ATR
 
-# ------------------------------------------------------------------
-# Data structures
+    # ATR trailing stop config (see config.py)
+    # ATR_TRAILING_MULT_DEFAULT controls how many ATRs below the highest close the trailing stop sits
+    # ATR_LOCK_IN_PROFIT_AFTER_R determines how many R of profit before allowing stop to move up to entry
 # ------------------------------------------------------------------
 
 @dataclass
@@ -121,6 +124,51 @@ def load_daily_bars_from_csv(csv_path: str) -> pd.DataFrame:
         daily_bars_dataframe.sort_values("timestamp").reset_index(drop=True)
     )
     return daily_bars_dataframe
+
+
+def resolve_daily_csv_path_for_symbol(symbol: str) -> str:
+    """Resolve the daily CSV path for `symbol` with helpful fallbacks.
+
+    Tries (in order):
+      - exact path using DAILY_CSV_PATH_TEMPLATE
+      - case-insensitive exact match in data/*.csv
+      - suggests close matches using difflib
+
+    Raises FileNotFoundError with a descriptive message if nothing is found.
+    """
+    candidate = DAILY_CSV_PATH_TEMPLATE.format(symbol=symbol)
+    candidate_path = Path(candidate)
+    if candidate_path.exists():
+        return str(candidate_path)
+
+    data_dir = Path("data")
+    if not data_dir.exists():
+        raise FileNotFoundError(
+            f"Daily CSV not found for symbol '{symbol}', and data directory does not exist: {data_dir}"
+        )
+
+    daily_files = sorted(data_dir.glob("*_daily.csv"))
+    available_symbols = [p.name.replace("_daily.csv", "") for p in daily_files]
+
+    # Case-insensitive exact match
+    for s in available_symbols:
+        if s.lower() == symbol.lower():
+            return str(data_dir / f"{s}_daily.csv")
+
+    # Suggest close matches
+    import difflib
+
+    matches = difflib.get_close_matches(symbol, available_symbols, n=3, cutoff=0.5)
+    if matches:
+        suggestion = matches[0]
+        raise FileNotFoundError(
+            f"Daily CSV not found for symbol '{symbol}'. Did you mean '{suggestion}'? "
+            f"Available symbols: {', '.join(available_symbols)}"
+        )
+
+    raise FileNotFoundError(
+        f"Daily CSV not found for symbol '{symbol}'. Available symbols: {', '.join(available_symbols)}"
+    )
 
 def compute_atr(daily_bars_dataframe: pd.DataFrame, period: int) -> pd.Series:
     """
@@ -291,6 +339,8 @@ def simulate_backtest_for_symbol_daily(
     current_entry_date: Optional[pd.Timestamp] = None
     current_take_profit_price: Optional[float] = None
     current_stop_loss_price: Optional[float] = None
+    highest_close_since_entry: Optional[float] = None
+    initial_stop_loss_price: Optional[float] = None
 
     executed_trades: List[BacktestTrade] = []
 
@@ -363,6 +413,10 @@ def simulate_backtest_for_symbol_daily(
             current_take_profit_price = take_profit_price
             current_stop_loss_price = stop_loss_price
 
+            # Initialize trailing-stop tracking
+            highest_close_since_entry = entry_price
+            initial_stop_loss_price = stop_loss_price
+
             cash_balance -= required_cash
 
         # ------------------------------------------------------
@@ -380,6 +434,33 @@ def simulate_backtest_for_symbol_daily(
 
             exit_price: Optional[float] = None
 
+            # Update highest close since entry
+            if highest_close_since_entry is None:
+                highest_close_since_entry = current_entry_price
+            highest_close_since_entry = max(highest_close_since_entry, close_price)
+
+            # Compute current ATR using precomputed series (aligned)
+            atr_value = float(atr_series.iloc[bar_index]) if not pd.isna(atr_series.iloc[bar_index]) else None
+
+            # Update trailing stop candidate if ATR is available
+            if atr_value is not None:
+                candidate_stop = highest_close_since_entry - ATR_TRAILING_MULT_DEFAULT * atr_value
+
+                # Only move the stop up (never down)
+                current_stop_loss_price = max(current_stop_loss_price, candidate_stop)
+
+                # Allow stop to be moved up to at least entry price once we've locked in enough R of profit
+                if initial_stop_loss_price is not None:
+                    initial_r = current_entry_price - initial_stop_loss_price
+                    if initial_r > 0:
+                        unrealized_profit_per_share = close_price - current_entry_price
+                        profit_in_r = unrealized_profit_per_share / initial_r
+
+                        if profit_in_r >= ATR_LOCK_IN_PROFIT_AFTER_R:
+                            # Ensure stop can move up to at least entry price
+                            current_stop_loss_price = max(current_stop_loss_price, current_entry_price)
+
+            # Exit checks (stop first, then TP, then time-based)
             # Stop-loss first
             if low_price <= current_stop_loss_price:
                 exit_price = current_stop_loss_price
@@ -421,6 +502,8 @@ def simulate_backtest_for_symbol_daily(
                 current_entry_date = None
                 current_take_profit_price = None
                 current_stop_loss_price = None
+                highest_close_since_entry = None
+                initial_stop_loss_price = None
 
         bar_index += 1
 
@@ -455,6 +538,8 @@ def simulate_backtest_for_symbol_daily(
                 holding_days=holding_days,
             )
         )
+        highest_close_since_entry = None
+        initial_stop_loss_price = None
 
     return cash_balance, executed_trades
 
@@ -572,7 +657,7 @@ def print_backtest_summary(
 # ------------------------------------------------------------------
 
 def run_backtest_for_symbol(symbol: str, starting_cash: float = STARTING_CASH_DEFAULT):
-    daily_csv_path = DAILY_CSV_PATH_TEMPLATE.format(symbol=symbol)
+    daily_csv_path = resolve_daily_csv_path_for_symbol(symbol)
     daily_bars_dataframe = load_daily_bars_from_csv(daily_csv_path)
 
     ending_cash, trades = simulate_backtest_for_symbol_daily(
@@ -597,4 +682,15 @@ def run_backtest_for_symbol(symbol: str, starting_cash: float = STARTING_CASH_DE
 
 
 if __name__ == "__main__":
-    run_backtest_for_symbol(symbol=SYMBOL_TO_TEST, starting_cash=STARTING_CASH_DEFAULT)
+    try:
+        run_backtest_for_symbol(symbol=SYMBOL_TO_TEST, starting_cash=STARTING_CASH_DEFAULT)
+    except FileNotFoundError as e:
+        # Friendly error message for missing CSVs (e.g. typos in symbol)
+        print(f"[error] {e}")
+        import sys
+
+        sys.exit(1)
+    except Exception as e:
+        # Re-raise unexpected exceptions but print a short message first
+        print(f"[error] Unexpected exception: {e}")
+        raise

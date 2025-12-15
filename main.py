@@ -22,7 +22,7 @@ from models import TargetPosition  # you already import this somewhere, just mak
 from pathlib import Path
 from typing import List
 
-from circuit_breakers import has_hit_daily_loss_limit
+from circuit_breakers import has_hit_daily_loss_limit, get_current_equity
 
 def is_rth(now: datetime | None = None) -> bool:
     """
@@ -133,6 +133,14 @@ def main(symbols: list[str] = None):
     init_order_log()
     init_db()
 
+    # Capture starting equity for the session (used by the circuit breaker)
+    try:
+        session_start_equity = get_current_equity()
+        print(f"Session starting equity: ${session_start_equity:.2f}")
+    except Exception as exc:
+        print(f"Warning: could not read starting equity for session: {exc}")
+        session_start_equity = 0.0
+
     eod_orders_canceled = False  #cancel all open orders
     eod_completed = False   #break out after all eod instructions are executed
 
@@ -162,28 +170,17 @@ def main(symbols: list[str] = None):
                     # -------------------------------------------------
                     # Circuit breaker: daily loss limit
                     # -------------------------------------------------
-                    hit_limit, cb_message = has_hit_daily_loss_limit()
-                    print(cb_message)
-    
-                    if hit_limit:
-                        print("Completed program. Exiting gracefully due to daily loss limit.")
-                        return
                     try:
-                        result = has_hit_daily_loss_limit()
-                        if isinstance(result, tuple):
-                            hit_limit = bool(result[0])
-                            cb_message = str(result[1]) if len(result) > 1 else ""
-                        else:
-                            hit_limit = bool(result)
-                            cb_message = ""
+                        hit_limit = has_hit_daily_loss_limit(session_start_equity)
+                        cb_message = "[circuit] Daily loss limit hit." if hit_limit else ""
                     except Exception as exc:
                         print(f"Circuit-breaker check failed: {exc}")
                         hit_limit = False
                         cb_message = ""
-    
+
                     if cb_message:
                         print(cb_message)
-    
+
                     if hit_limit:
                         print("Completed program. Exiting gracefully due to daily loss limit.")
                         return

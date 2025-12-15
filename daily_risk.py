@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
-from config import MAX_DAILY_TRADES_PER_DAY
+from config import MAX_DAILY_TRADES_PER_DAY, MAX_TRADES_PER_SYMBOL_PER_DAY
 
 
 @dataclass
@@ -76,3 +76,36 @@ def register_new_trade() -> None:
     """
     state = _ensure_state_for_today()
     state.trades_opened += 1
+
+# -------------------------------------------------------------------
+# Per-symbol daily trade cap
+# -------------------------------------------------------------------
+
+_symbol_trade_counts: Dict[Tuple[str, date], int] = {}
+
+
+def _today() -> date:
+    """Helper to get today's date; kept separate for testability."""
+    return datetime.now().date()
+
+
+def can_open_new_trade_for_symbol(
+    symbol: str,
+    max_trades_per_day: int = MAX_TRADES_PER_SYMBOL_PER_DAY,
+) -> bool:
+    """
+    Return True if we have not yet exceeded the allowed number of
+    entries for this symbol today.
+    """
+    key = (symbol, _today())
+    return _symbol_trade_counts.get(key, 0) < max_trades_per_day
+
+
+def record_new_trade_for_symbol(symbol: str) -> None:
+    """
+    Increment the count of entries taken today for this symbol.
+    Call this after we successfully submit a new ENTRY order
+    (flat -> long).
+    """
+    key = (symbol, _today())
+    _symbol_trade_counts[key] = _symbol_trade_counts.get(key, 0) + 1

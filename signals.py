@@ -9,6 +9,11 @@ from config import (
     BREAKOUT_TOLERANCE_PCT,
     ENTRY_LIMIT_OFFSET_PCT,
     UPTREND_TOLERANCE_PCT,   
+    ATR_SMA_ENTRY_PERIOD_DEFAULT,
+    ATR_ENTRY_PERIOD_DEFAULT,
+    ATR_SMA_ENTRY_TOLERANCE_PCT,
+    ATR_ENTRY_MIN_PCT,
+    ATR_ENTRY_MAX_PCT,
 )
 
 
@@ -237,6 +242,115 @@ def compute_entry_signal_for_mode(
         return compute_sma_trend_entry_signal(bars)
     else:
         raise ValueError(f"Unknown entry signal mode: {mode}")
+
+
+def compute_atr_sma_trend_entry_signal(
+    daily_bars_dataframe: pd.DataFrame,
+    sma_period: int = ATR_SMA_ENTRY_PERIOD_DEFAULT,
+    atr_period: int = ATR_ENTRY_PERIOD_DEFAULT,
+    sma_tolerance_pct: float = ATR_SMA_ENTRY_TOLERANCE_PCT,
+    atr_min_pct: float = ATR_ENTRY_MIN_PCT,
+    atr_max_pct: float = ATR_ENTRY_MAX_PCT,
+) -> Optional[EntrySignal]:
+    """
+    Entry signal combining ATR volatility and SMA trend on daily bars.
+
+    Returns EntrySignal(limit_price=current_close, reason=...) when
+    conditions pass; otherwise returns None and prints a [signal] message.
+    """
+
+    if daily_bars_dataframe is None or daily_bars_dataframe.empty:
+        print("[signal] No bars provided or DataFrame is empty; cannot compute atr_sma_trend signal.")
+        return None
+
+    required_bars = max(sma_period, atr_period) + 1
+    if len(daily_bars_dataframe) < required_bars:
+        print(
+            f"[signal] Not enough bars for atr_sma_trend: have {len(daily_bars_dataframe)}, need at least {required_bars}."
+        )
+        return None
+
+    # Ensure required columns
+    for col in ("high", "low", "close"):
+        if col not in daily_bars_dataframe.columns:
+            print(f"[signal] Missing '{col}' column; cannot compute atr_sma_trend.")
+            return None
+
+    df = daily_bars_dataframe.copy()
+    df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+
+    # SMA over close
+    df["sma"] = df["close"].rolling(window=sma_period).mean()
+
+    # ATR computation (True Range and SMA ATR)
+    atr_series = _compute_atr_series(df, atr_period)
+
+    last_row = df.iloc[-1]
+
+    current_close = float(last_row["close"])
+    current_sma = float(last_row["sma"])
+    current_atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else None
+
+    if pd.isna(current_sma):
+        print(
+            "[signal] atr_sma_trend uptrend failed: SMA is NaN (not enough data for SMA)."
+        )
+        return None
+
+    # Uptrend condition
+    min_uptrend_level = current_sma * (1.0 + sma_tolerance_pct / 100.0)
+    if current_close < min_uptrend_level:
+        print(
+            "[signal] atr_sma_trend uptrend failed: "
+            f"current_close={current_close:.2f} < threshold={min_uptrend_level:.2f} "
+            f"(sma={current_sma:.2f}, tol={sma_tolerance_pct:.2f}%)."
+        )
+        return None
+
+    if current_atr is None or pd.isna(current_atr):
+        print(f"[signal] atr_sma_trend ATR filter failed: ATR is NaN or None; cannot compute volatility.")
+        return None
+
+    atr_pct = (current_atr / current_close) * 100.0
+    if not (atr_min_pct <= atr_pct <= atr_max_pct):
+        print(
+            "[signal] atr_sma_trend ATR filter failed: "
+            f"atr_pct={atr_pct:.4f}% not in [{atr_min_pct:.4f}%, {atr_max_pct:.4f}%]."
+        )
+        return None
+
+    # Passed filters — propose entry at current close
+    limit_price = current_close
+    reason = (
+        "ATR+SMA trend signal: "
+        f"sma_period={sma_period}, atr_period={atr_period}, "
+        f"close={current_close:.2f}, sma={current_sma:.2f}, atr_pct={atr_pct:.4f}%"
+    )
+
+    print(
+        "[signal] atr_sma_trend GENERATED: "
+        f"close={current_close:.2f}, sma={current_sma:.2f}, atr_pct={atr_pct:.4f}%."
+    )
+
+    return EntrySignal(limit_price=limit_price, reason=reason)
+
+
+def _compute_atr_series(bars: pd.DataFrame, period: int) -> pd.Series:
+    """Return ATR series computed as rolling mean of True Range over `period`.
+
+    True Range = max(high-low, abs(high-prev_close), abs(low-prev_close)).
+    """
+    if bars is None or bars.empty:
+        return pd.Series(dtype=float)
+
+    prev_close = bars["close"].shift(1)
+    tr1 = bars["high"] - bars["low"]
+    tr2 = (bars["high"] - prev_close).abs()
+    tr3 = (bars["low"] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
 
 
 if __name__ == "__main__":

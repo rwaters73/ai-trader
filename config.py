@@ -18,6 +18,8 @@ MAX_OPEN_POSITIONS: int = 3
 # Example: 0.3 = 30% of account equity.
 MAX_CAPITAL_PER_SYMBOL_FRACTION: float = 0.30
 
+# Max number of *new entries* per symbol per trading day
+MAX_TRADES_PER_SYMBOL_PER_DAY = 1
 
 # =========================
 # Live trading circuit breakers
@@ -119,6 +121,21 @@ ATR_STOP_MULTIPLIER_DEFAULT = 2.0
 # ATR-based exit defaults
 ATR_MULTIPLIER_TP_DEFAULT = 2.0       # TP at +2 ATR
 ATR_MULTIPLIER_SL_DEFAULT = 1.0       # SL at -1 ATR
+
+# --- ATR-based entry filters (for atr_sma_trend) ---
+# How many daily bars to use for ATR when evaluating entries
+ATR_ENTRY_PERIOD_DEFAULT = 14
+
+# We look at ATR as a % of price and want a "sweet spot" of volatility.
+# Example: between 2% and 12% of price (tune later).
+ATR_ENTRY_MIN_PCT = 2.0
+ATR_ENTRY_MAX_PCT = 12.0
+
+# How many days for SMA in atr_sma_trend
+ATR_SMA_ENTRY_PERIOD_DEFAULT = 20
+
+# How far above the SMA the close must be (e.g. 0.5% above)
+ATR_SMA_ENTRY_TOLERANCE_PCT = 0.5
 
 # Fraction of capital to risk per trade in backtests
 # Example: 0.01 means risk 1 percent of current cash per trade

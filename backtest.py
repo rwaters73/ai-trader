@@ -30,6 +30,7 @@ from indicators import compute_atr_series
 from signals import (
     compute_recent_high_breakout_signal,
     compute_sma_trend_entry_signal,
+    compute_atr_sma_trend_entry_signal,
     EntrySignal,
     compute_entry_signal_for_mode,
 )
@@ -38,7 +39,12 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--symbol", type=str, default="TSLA")
-parser.add_argument("--signal", type=str, default="breakout") #breakout or sma_trend
+parser.add_argument(
+    "--signal",
+    choices=["breakout", "sma_trend", "atr_sma_trend"],
+    default="breakout",
+    help="Which entry signal to use",
+)
 args = parser.parse_args()
 
 
@@ -206,16 +212,22 @@ def compute_entry_signal_for_index(
     current_index: int,
 ) -> Optional[EntrySignal]:
     """
-    For a given bar index, slice the daily bars up to *and including* that bar,
-    and run the chosen daily entry logic (breakout or SMA trend).
+    For a given bar index, slice the daily bars up to *and including* that bar
+    and run whichever entry signal mode is currently selected.
     """
     bars_up_to_now = daily_bars_dataframe.iloc[: current_index + 1]
 
-    if bars_up_to_now.empty:
+    if ENTRY_SIGNAL_MODE == "breakout":
+        return compute_recent_high_breakout_signal(bars_up_to_now)
+    elif ENTRY_SIGNAL_MODE == "sma_trend":
+        return compute_sma_trend_entry_signal(bars_up_to_now)
+    elif ENTRY_SIGNAL_MODE == "atr_sma_trend":
+        # Uses both SMA trend and ATR sweet-spot filters
+        return compute_atr_sma_trend_entry_signal(bars_up_to_now)
+    else:
+        # Failsafe: no signal
+        print(f"[signal] Unknown ENTRY_SIGNAL_MODE={ENTRY_SIGNAL_MODE}; staying flat.")
         return None
-
-    # Single dispatcher call into the signals module
-    return compute_entry_signal_for_mode(bars_up_to_now, mode=ENTRY_SIGNAL_MODE)
 
 def add_atr_column(
     daily_bars_dataframe: pd.DataFrame,

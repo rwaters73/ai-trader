@@ -13,7 +13,12 @@ from alpaca.trading.requests import (
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
-from daily_risk import can_open_new_trade, register_new_trade
+from daily_risk import (
+    can_open_new_trade, 
+    register_new_trade, 
+    can_open_new_trade_for_symbol, 
+    record_new_trade_for_symbol,
+)
 
 # Try to import StopOrderRequest; if not available in this alpaca-py version,
 # we'll skip placing real SL orders and just log a warning.
@@ -22,8 +27,9 @@ try:
 except ImportError:
     StopOrderRequest = None  # type: ignore
 
+import logger  # for logger.warning(), logger.debug(), etc.
 from logger import log_order  # CSV order log (still available if we want it)
-from data import get_latest_quote, get_recent_history
+from data import get_latest_quote, get_recent_history, get_intraday_history
 from models import SymbolState, TargetPosition
 from db import log_order_to_db, log_order_event_to_db, log_risk_event_to_db
 
@@ -373,10 +379,17 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
     is_entry_from_flat = (abs(current) < 1e-6) and (desired > 0)
 
     # --------------------------------------------------
-    # Daily risk circuit breaker for new entries
+    # Daily risk circuit breaker for new entries (global and per-symbol)
     # --------------------------------------------------
     if is_entry_from_flat:
-        allowed, reason = can_open_new_trade()
+        # Global daily limit
+        try:
+            allowed, reason = can_open_new_trade()
+        except Exception:
+            # Some implementations may return a single bool
+            allowed = bool(can_open_new_trade())
+            reason = ""
+
         if not allowed:
             print(
                 f"{state.symbol}: DAILY RISK HALT - {reason} "
@@ -384,8 +397,18 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
             )
             return
 
+        # Per-symbol cap: avoid repeated re-entries for same symbol
+        if not can_open_new_trade_for_symbol(state.symbol):
+            print(
+                f"[RISK] {state.symbol}: Per-symbol trade cap reached for today; "
+                f"skipping new entry."
+            )
+            return
+
+    order = None  # will hold whatever order we submit
+
     # --------------------------------------------------
-    # Place the appropriate order
+    # Place the appropriate order (respect portfolio caps for new limit entries)
     # --------------------------------------------------
     if is_entry_from_flat and target.entry_type.lower() == "limit" and target.entry_limit_price is not None:
         # --- Portfolio exposure gate ---
@@ -405,8 +428,8 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
         print(
             f"{state.symbol}: Submitting LIMIT {side.name} quantity={quantity} at "
             f"{target.entry_limit_price:.2f} to reach target."
-        )        
-        
+        )
+
         order = submit_limit_order(
             symbol=state.symbol,
             quantity=quantity,
@@ -425,9 +448,20 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
         )
 
     # If this was a new entry and the order was successfully submitted,
-    # increment the daily trade count.
+    # increment the daily trade count and record per-symbol usage.
     if is_entry_from_flat and order is not None:
-        register_new_trade()
+        try:
+            register_new_trade()
+        except Exception:
+            # ignore if register not present or fails
+            pass
+
+        try:
+            record_new_trade_for_symbol(state.symbol)
+        except Exception:
+            # ignore if per-symbol recorder not present
+            pass
+
         print(f"{state.symbol}: Registered new trade for daily risk tracking.")
 
     if order is not None:
@@ -488,6 +522,93 @@ def compute_atr_for_symbol(
         return None
 
     return float(latest_atr)
+
+def compute_intraday_atr_for_symbol(
+    symbol: str,
+    atr_period: Optional[int] = None,
+) -> Optional[float]:
+    """
+    Compute ATR using recent INTRADAY bars for the given symbol.
+
+    Uses the same ATR math as `compute_atr_for_symbol`, but pulls
+    minute bars via get_intraday_history and applies the configured
+    intraday lookback and bar size.
+
+    Returns the latest ATR value, or None if not enough data.
+    """
+    from config import (
+        ATR_PERIOD_DEFAULT,
+        INTRADAY_LOOKBACK_MINUTES,
+        INTRADAY_BAR_SIZE_MINUTES,
+    )
+
+    if atr_period is None:
+        atr_period = ATR_PERIOD_DEFAULT
+
+    intraday_df = get_intraday_history(
+        symbol=symbol,
+        lookback_minutes=INTRADAY_LOOKBACK_MINUTES,
+        bar_size_minutes=INTRADAY_BAR_SIZE_MINUTES,
+    )
+
+    if intraday_df is None or intraday_df.empty:
+        logger.warning(
+            "ATR intraday: no intraday bars for %s; cannot compute ATR.",
+            symbol,
+        )
+        return None
+
+    if len(intraday_df) < atr_period + 1:
+        logger.warning(
+            "ATR intraday: not enough bars for %s: have %d, need at least %d.",
+            symbol,
+            len(intraday_df),
+            atr_period + 1,
+        )
+        return None
+
+    # Make sure we are working with floats
+    df = intraday_df.copy()
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["close"] = df["close"].astype(float)
+
+    # Previous close per bar
+    df["prev_close"] = df["close"].shift(1)
+
+    # True Range components
+    df["tr1"] = df["high"] - df["low"]
+    df["tr2"] = (df["high"] - df["prev_close"]).abs()
+    df["tr3"] = (df["low"] - df["prev_close"]).abs()
+
+    df["true_range"] = df[["tr1", "tr2", "tr3"]].max(axis=1)
+
+    # Simple moving average ATR
+    df["atr"] = df["true_range"].rolling(
+        window=atr_period,
+        min_periods=atr_period,
+    ).mean()
+
+    latest_atr = float(df["atr"].iloc[-1])
+
+    if not math.isfinite(latest_atr) or latest_atr <= 0:
+        logger.warning(
+            "ATR intraday: last ATR value invalid for %s: %s",
+            symbol,
+            latest_atr,
+        )
+        return None
+
+    logger.debug(
+        "ATR intraday: latest ATR for %s over %d bars (lookback %d min, bar %d min) is %.4f",
+        symbol,
+        atr_period,
+        INTRADAY_LOOKBACK_MINUTES,
+        INTRADAY_BAR_SIZE_MINUTES,
+        latest_atr,
+    )
+
+    return latest_atr
 
 
 def flatten_symbol(symbol: str):
@@ -668,40 +789,31 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
             print(f"{symbol}: Could not inspect side on open order; skipping exit creation.")
             return
 
-    # Try to compute ATR-based SL/TP
-    atr_value = compute_atr_for_symbol(symbol)
+    # Compute ATR: prefer intraday, fall back to daily
+    atr_value = compute_intraday_atr_for_symbol(symbol)
+    if atr_value is None:
+        atr_value = compute_atr_for_symbol(symbol)
+    
+    if atr_value is None:
+        logger.warning(f"{symbol}: ATR (intraday and daily) not available; skipping exit order creation.")
+        return
 
-    if atr_value is not None:
-        take_profit_price = average_entry_price + ATR_TP_MULTIPLIER_DEFAULT * atr_value
-        stop_loss_price = average_entry_price - ATR_MULTIPLIER_SL_DEFAULT * atr_value
-        print(
-            f"{symbol}: Using ATR-based exits. ATR={atr_value:.2f}, "
-            f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f} "
-            f"(TP_mult={ATR_TP_MULTIPLIER_DEFAULT}, SL_mult={ATR_MULTIPLIER_SL_DEFAULT})."
-        )
-    else:
-        # Fallback: percentage-based exits from config
-        take_profit_percent = BRACKET_TP_PERCENT_BY_SYMBOL.get(
-            symbol,
-            DEFAULT_BRACKET_TP_PERCENT,
-        )
-        stop_loss_percent = BRACKET_SL_PERCENT_BY_SYMBOL.get(
-            symbol,
-            DEFAULT_BRACKET_SL_PERCENT,
-        )
+    # Use bid or ask as the current price
+    last_price = state.bid if state.bid and state.bid > 0 else state.ask
+    if last_price is None or last_price <= 0:
+        logger.warning(f"{symbol}: No valid bid/ask price; skipping exit order creation.")
+        return
 
-        take_profit_price = average_entry_price * (1.0 + take_profit_percent / 100.0)
-        stop_loss_price = average_entry_price * (1.0 - stop_loss_percent / 100.0)
-
-        print(
-            f"{symbol}: ATR not available. Falling back to percent-based exits. "
-            f"TP={take_profit_price:.2f} (+{take_profit_percent}%), "
-            f"SL={stop_loss_price:.2f} (-{stop_loss_percent}%)."
-        )
-
-    # Log intended TP and SL, but submit only a single STOP order (SL).
+    # Compute stop-loss price only
+    stop_loss_price = last_price - atr_value * ATR_MULTIPLIER_SL_DEFAULT
     print(
-        f"{symbol}: Intended TP={take_profit_price:.2f}, submitting SL STOP at {stop_loss_price:.2f} "
+        f"{symbol}: Using ATR-based stop-loss. Last price={last_price:.2f}, ATR={atr_value:.2f}, "
+        f"SL={stop_loss_price:.2f} (SL_mult={ATR_MULTIPLIER_SL_DEFAULT})."
+    )
+
+    # Submit only the STOP order
+    print(
+        f"{symbol}: Submitting SL STOP at {stop_loss_price:.2f} "
         f"for quantity={position_quantity}."
     )
 

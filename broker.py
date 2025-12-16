@@ -4,6 +4,8 @@ import math
 from typing import Optional
 from datetime import datetime, timezone
 
+import requests
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
@@ -68,10 +70,27 @@ _trading_client = TradingClient(
 def build_symbol_state(symbol: str) -> SymbolState:
     """
     Gather quote, position, and open-order info into a SymbolState snapshot.
+
+    This function tolerates missing quote data (e.g., when Alpaca returns a
+    502/503). Instead of raising, it sets bid/ask to None and continues so the
+    trading loop can make a conservative decision for the symbol.
     """
-    quote = get_latest_quote(symbol)
-    bid_price = quote.bid_price
-    ask_price = quote.ask_price
+    bid_price: Optional[float] = None
+    ask_price: Optional[float] = None
+
+    try:
+        quote = get_latest_quote(symbol)
+        if quote is not None:
+            # Some SDK versions use different attribute names
+            bid_price = getattr(quote, "bid_price", getattr(quote, "bid", None))
+            ask_price = getattr(quote, "ask_price", getattr(quote, "ask", None))
+        else:
+            print(f"[WARN] No quote available for {symbol} (Alpaca may be returning 5xx).")
+
+    except Exception as e:
+        print(f"[WARN] Failed to fetch quote for {symbol}: {e}. Continuing with no quote.")
+        bid_price = None
+        ask_price = None
 
     position_quantity, average_entry_price = get_position_info(symbol)
     open_orders_exist = has_open_orders(symbol)
@@ -175,6 +194,47 @@ def submit_market_order(
             f"{quantity:.4f} to whole shares={normalized_quantity}"
         )
 
+    # Alpaca does not allow MARKET orders during extended hours (pre/post). In
+    # that case we convert the request into a DAY LIMIT order priced at the
+    # current quote (ask for BUY, bid for SELL) to preserve the user's intent
+    # without crashing the program due to API 422 errors.
+    if extended:
+        print(
+            f"[WARN] MARKET orders not allowed in extended hours for {symbol}; "
+            "converting to DAY LIMIT order using current quote."
+        )
+        try:
+            quote = get_latest_quote(symbol)
+            if quote is None:
+                print(
+                    f"[ERROR] Cannot place converted LIMIT for {symbol}: no quote available. Skipping order."
+                )
+                return None
+
+            if side == OrderSide.BUY:
+                limit_price = getattr(quote, "ask_price", getattr(quote, "ask", None))
+            else:
+                limit_price = getattr(quote, "bid_price", getattr(quote, "bid", None))
+
+            if limit_price is None:
+                print(
+                    f"[ERROR] Cannot place converted LIMIT for {symbol}: quote missing bid/ask. Skipping order."
+                )
+                return None
+
+            # Use the existing limit-order helper which already normalizes prices
+            return submit_limit_order(
+                symbol=symbol,
+                quantity=normalized_quantity,
+                side=side,
+                limit_price=limit_price,
+                extended=True,
+            )
+
+        except Exception as exc:
+            print(f"[ERROR] Failed to convert MARKET->LIMIT for {symbol}: {exc}")
+            return None
+
     order_request = MarketOrderRequest(
         symbol=symbol,
         qty=normalized_quantity,
@@ -183,19 +243,29 @@ def submit_market_order(
         extended_hours=extended,
     )
 
-    order = _trading_client.submit_order(order_request)
+    try:
+        order = _trading_client.submit_order(order_request)
+    except APIError as api_err:
+        print(f"[ERROR] Alpaca APIError during MARKET order for {symbol}: {api_err}")
+        return None
+    except requests.exceptions.HTTPError as http_err:
+        print(f"[ERROR] HTTPError during MARKET order for {symbol}: {http_err}")
+        return None
+    except Exception as exc:
+        print(f"[ERROR] Unexpected error submitting MARKET order for {symbol}: {exc}")
+        return None
 
     if order is not None:
         log_order_to_db(order)
 
         # If the order is already filled (typical for paper market orders)
-        if order.filled_at is not None:
+        if getattr(order, "filled_at", None) is not None:
             log_order_event_to_db(
                 alpaca_order_id=str(order.id),
                 event_type="filled",
-                filled_qty=float(order.filled_qty or 0),
-                remaining_qty=float(order.qty) - float(order.filled_qty or 0),
-                status=str(order.status),
+                filled_qty=float(getattr(order, "filled_qty", 0) or 0),
+                remaining_qty=float(getattr(order, "qty", 0)) - float(getattr(order, "filled_qty", 0) or 0),
+                status=str(getattr(order, "status", "")),
             )
 
     return order
@@ -246,18 +316,28 @@ def submit_limit_order(
         extended_hours=extended,
     )
 
-    order = _trading_client.submit_order(order_request)
+    try:
+        order = _trading_client.submit_order(order_request)
+    except APIError as api_err:
+        print(f"[ERROR] Alpaca APIError during LIMIT order for {symbol}: {api_err}")
+        return None
+    except requests.exceptions.HTTPError as http_err:
+        print(f"[ERROR] HTTPError during LIMIT order for {symbol}: {http_err}")
+        return None
+    except Exception as exc:
+        print(f"[ERROR] Unexpected error submitting LIMIT order for {symbol}: {exc}")
+        return None
 
     if order is not None:
         log_order_to_db(order)
 
-        if order.filled_at is not None:
+        if getattr(order, "filled_at", None) is not None:
             log_order_event_to_db(
                 alpaca_order_id=str(order.id),
                 event_type="filled",
-                filled_qty=float(order.filled_qty or 0),
-                remaining_qty=float(order.qty) - float(order.filled_qty or 0),
-                status=str(order.status),
+                filled_qty=float(getattr(order, "filled_qty", 0) or 0),
+                remaining_qty=float(getattr(order, "qty", 0)) - float(getattr(order, "filled_qty", 0) or 0),
+                status=str(getattr(order, "status", "")),
             )
 
     return order

@@ -24,6 +24,11 @@ _data_client = StockHistoricalDataClient(
     secret_key=ALPACA_API_SECRET_KEY,
 )
 
+# Lightweight in-memory cache for the most-recent quote per symbol. This lets
+# the bot continue using a slightly stale quote if Alpaca has a temporary
+# outage (e.g., 502). The cache is updated on every successful quote fetch.
+_last_quote_cache: dict[str, object] = {}
+
 
 # -------------------------------------------------------------------
 # Latest quote
@@ -32,13 +37,77 @@ _data_client = StockHistoricalDataClient(
 def get_latest_quote(symbol: str):
     """
     Fetch the latest quote object for a stock symbol from Alpaca's data API.
-    Returns the Alpaca quote model; caller pulls bid/ask from it.
 
-    NOTE: This still uses Alpaca's configured feed (e.g., IEX for your plan).
+    This function is hardened against transient Alpaca server errors (e.g., 502/503)
+    by performing a small number of retries with exponential backoff. On persistent
+    failure we return None so callers can continue operating rather than raising
+    an exception that crashes the whole process.
     """
     request_params = StockLatestQuoteRequest(symbol_or_symbols=symbol)
-    latest_quote_map = _data_client.get_stock_latest_quote(request_params)
-    return latest_quote_map[symbol]
+
+    import time
+    import random
+    MAX_ATTEMPTS = 3
+    backoff_base = 0.5
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            latest_quote_map = _data_client.get_stock_latest_quote(request_params)
+            # latest_quote_map is a dict keyed by symbol
+            result_quote = latest_quote_map.get(symbol)
+            if result_quote is not None:
+                _last_quote_cache[symbol] = result_quote
+            return result_quote
+
+        except APIError as api_err:
+            # Alpaca SDK wraps HTTP errors in APIError; log and retry
+            if attempt < MAX_ATTEMPTS:
+                sleep_time = backoff_base * (2 ** (attempt - 1))
+                sleep_time += random.uniform(0, 0.2)
+                print(
+                    f"[WARN] Alpaca APIError fetching latest quote for {symbol} (attempt {attempt}/{MAX_ATTEMPTS}): {api_err}. Retrying in {sleep_time:.1f}s"
+                )
+                time.sleep(sleep_time)
+                continue
+            else:
+                print(
+                    f"[ERROR] Alpaca APIError fetching latest quote for {symbol}: {api_err}. Giving up."
+                )
+                # Fall back to cached quote if we have one
+                cached = _last_quote_cache.get(symbol)
+                if cached is not None:
+                    print(f"[WARN] Using cached (stale) quote for {symbol} after API errors.")
+                    return cached
+                return None
+
+        except requests.exceptions.HTTPError as http_err:
+            # Direct requests HTTP errors (in case the SDK raises them)
+            if attempt < MAX_ATTEMPTS:
+                sleep_time = backoff_base * (2 ** (attempt - 1))
+                sleep_time += random.uniform(0, 0.2)
+                print(
+                    f"[WARN] HTTPError fetching latest quote for {symbol} (attempt {attempt}/{MAX_ATTEMPTS}): {http_err}. Retrying in {sleep_time:.1f}s"
+                )
+                time.sleep(sleep_time)
+                continue
+            else:
+                print(
+                    f"[ERROR] HTTPError fetching latest quote for {symbol}: {http_err}. Giving up."
+                )
+                cached = _last_quote_cache.get(symbol)
+                if cached is not None:
+                    print(f"[WARN] Using cached (stale) quote for {symbol} after HTTP errors.")
+                    return cached
+                return None
+
+        except Exception as unexpected:
+            # Be conservative: don't crash the main loop on unexpected issues
+            print(
+                f"[WARN] Unexpected error fetching latest quote for {symbol}: {unexpected}. Returning None."
+            )
+            return None
+
+    return None
 
 
 # -------------------------------------------------------------------

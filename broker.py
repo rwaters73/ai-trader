@@ -46,6 +46,8 @@ from config import (
     ATR_TP_MULTIPLIER_DEFAULT,
     MAX_ENTRY_ORDER_AGE_MINUTES,
     RISK_LIMITED_STARTING_CASH,
+    LIVE_TRADING_ENABLED,
+    ENTRY_ORDER_TTL_SECONDS,
 )
 
 from risk_limits import (
@@ -179,6 +181,13 @@ def submit_market_order(
         print(f"[WARN] Not placing MARKET order for {symbol}: non-positive quantity={quantity}")
         return None
 
+    # If live trading is disabled, log and skip placing the order
+    if not LIVE_TRADING_ENABLED:
+        print(
+            f"[SIM] MARKET order (skipped): symbol={symbol}, side={side}, qty={quantity}, extended={extended}"
+        )
+        return None
+
     # Coerce to whole shares for safety
     normalized_quantity = int(quantity)
     if normalized_quantity <= 0:
@@ -289,6 +298,13 @@ def submit_limit_order(
         print(f"[WARN] Not placing LIMIT order for {symbol}: non-positive quantity={quantity}")
         return None
 
+    # If live trading is disabled, log and skip placing the order
+    if not LIVE_TRADING_ENABLED:
+        print(
+            f"[SIM] LIMIT order (skipped): symbol={symbol}, side={side}, qty={quantity}, limit_price={limit_price}, extended={extended}"
+        )
+        return None
+
     # Coerce to whole shares for safety
     normalized_quantity = int(quantity)
     if normalized_quantity <= 0:
@@ -365,6 +381,13 @@ def submit_stop_loss_order(
 
     if stop_price <= 0:
         print(f"[WARN] Not placing STOP order for {symbol}: non-positive stop_price={stop_price}")
+        return None
+
+    # If live trading is disabled, log and skip placing the stop order
+    if not LIVE_TRADING_ENABLED:
+        print(
+            f"[SIM] STOP order (skipped): symbol={symbol}, qty={quantity}, stop_price={stop_price}, extended={extended}"
+        )
         return None
 
     if StopOrderRequest is None:
@@ -744,21 +767,25 @@ def cancel_all_open_orders() -> None:
 
 def cancel_stale_entry_orders_for_symbol(
     state: SymbolState,
-    max_age_minutes: int = MAX_ENTRY_ORDER_AGE_MINUTES,
+    ttl_seconds: int = ENTRY_ORDER_TTL_SECONDS,
 ) -> None:
     """
     Cancel stale LIMIT BUY entry orders if:
       - We are currently FLAT in this symbol (position_qty == 0).
-      - There is an open BUY order.
-      - The order has been open longer than max_age_minutes.
+      - There are open BUY entry orders.
+      - The order's submitted_at timestamp is older than `ttl_seconds`.
 
-    This prevents us from chasing an entry all day after price runs away.
-    Exit orders (SELL TP/SL) are not touched.
+    This prevents us from chasing an entry after price moves away. Exit orders
+    (SELL TP/SL) are not affected.
     """
     symbol = state.symbol
 
-    # Only worry about stale ENTRY orders when flat.
+    # Only check for stale ENTRY orders if we are flat and there are open orders
     if abs(state.position_qty) > 1e-6:
+        return
+
+    if not state.has_open_orders:
+        # Fast path: nothing to do when we know there are no open orders
         return
 
     try:
@@ -779,34 +806,35 @@ def cancel_stale_entry_orders_for_symbol(
             if not side_str.endswith("buy"):
                 continue
 
-            # Pick a timestamp for "age" measurement.
-            # Alpaca Order usually has created_at and submitted_at as datetimes.
-            created_at = getattr(order, "created_at", None) or getattr(order, "submitted_at", None)
-            if created_at is None:
+            # Prefer submitted_at (when the order was actually sent); fallback to created_at
+            submitted_at = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
+            if submitted_at is None:
                 # No reliable timestamp; skip this order
-                print(f"[WARN] {symbol}: Open BUY order {order.id} has no created_at/submitted_at; skipping age check.")
+                print(f"[WARN] {symbol}: Open BUY order {order.id} has no submitted_at/created_at; skipping TTL check.")
                 continue
 
             # Ensure timezone-aware
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
+            if submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
 
-            age_minutes = (now_utc - created_at).total_seconds() / 60.0
+            age_seconds = (now_utc - submitted_at).total_seconds()
 
-            if age_minutes > max_age_minutes:
+            if age_seconds > ttl_seconds:
                 print(
-                    f"{symbol}: Cancelling STALE entry order {order.id} "
-                    f"(BUY, age={age_minutes:.1f} min > {max_age_minutes} min)."
+                    f"{symbol}: Cancelling ENTRY order {order.id} (BUY) due to TTL exceeded: age={age_seconds:.1f}s > {ttl_seconds}s."
                 )
-                _trading_client.cancel_order_by_id(order.id)
+                try:
+                    _trading_client.cancel_order_by_id(order.id)
+                except Exception as cancel_exc:
+                    print(f"[WARN] Failed to cancel order {order.id}: {cancel_exc}")
 
                 # Log cancel to DB
                 try:
                     log_order_event_to_db(
                         alpaca_order_id=str(order.id),
                         event_type="canceled_stale_entry",
-                        filled_qty=float(order.filled_qty or 0),
-                        remaining_qty=float(order.qty) - float(order.filled_qty or 0),
+                        filled_qty=float(getattr(order, "filled_qty", 0) or 0),
+                        remaining_qty=float(getattr(order, "qty", 0)) - float(getattr(order, "filled_qty", 0) or 0),
                         status="canceled",
                     )
                 except Exception as log_exc:

@@ -38,6 +38,10 @@ MAX_DAILY_LOSS_PERCENT = 5.0
 # before we cancel it and stop chasing that entry.
 MAX_ENTRY_ORDER_AGE_MINUTES = 15
 
+# Time-to-live for ENTRY orders in seconds. If an entry BUY order is older
+# than this TTL it will be canceled to avoid stale entries. Default: 120s
+ENTRY_ORDER_TTL_SECONDS = int(os.getenv("ENTRY_ORDER_TTL_SECONDS", "120"))
+
 
 if not ALPACA_API_KEY_ID or not ALPACA_API_SECRET_KEY:
     raise RuntimeError("Alpaca API keys are missing. Check your .env file.")
@@ -104,6 +108,12 @@ BRACKET_SL_PCT_BY_SYMBOL = {
     "AAPL": 2.0,   # SL at -2%
     "TSLA": 3.0,
 }
+
+# Live trading flag: default is False (safety).
+# You can override via environment variable LIVE_TRADING_ENABLED=true
+LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() in ("1", "true", "yes")
+
+ENTRY_ORDER_TTL_SECONDS = 120
 
 # ==========================================================
 # ATR based stop loss and take profit configuration

@@ -144,6 +144,10 @@ def main(symbols: list[str] = None):
     eod_orders_canceled = False  #cancel all open orders
     eod_completed = False   #break out after all eod instructions are executed
 
+    # Kill-switch: if this file exists we block new entries but still manage exits
+    stop_trading_logged = False
+    stop_trading_path = Path("data/STOP_TRADING")
+
     try:
         for i in range(ITERATIONS):
             now = datetime.now()
@@ -219,7 +223,35 @@ def main(symbols: list[str] = None):
                             take_profit_price=None,
                             stop_loss_price=None,
                         )
-                        
+
+                    # ------------------------------------------------
+                    # Kill-switch: block NEW entries if data/STOP_TRADING exists
+                    # (Log the detection once per run to avoid spamming logs.)
+                    # ------------------------------------------------
+                    try:
+                        if stop_trading_path.exists():
+                            if not stop_trading_logged:
+                                print("[kill-switch] STOP_TRADING detected; blocking NEW entries for this run. Existing positions will still be managed.")
+                                stop_trading_logged = True
+
+                            if state.position_qty == 0.0 and target.target_qty > 0.0:
+                                original_reason = target.reason
+                                target = TargetPosition(
+                                    symbol=state.symbol,
+                                    target_qty=0.0,
+                                    reason=(
+                                        "Kill switch active: blocking new entries. "
+                                        f"(original entry reason: {original_reason})"
+                                    ),
+                                    entry_type="market",
+                                    entry_limit_price=None,
+                                    take_profit_price=None,
+                                    stop_loss_price=None,
+                                )
+                    except Exception as exc:
+                        # Be conservative: if reading the file fails, don't block trading
+                        print(f"[WARN] Could not check STOP_TRADING file: {exc}")
+
                     log_decision(
                         state=state,
                         target=target,

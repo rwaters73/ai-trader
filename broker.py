@@ -997,3 +997,105 @@ def cancel_stale_entry_buy_limits_for_symbol(symbol: str, ttl_seconds: int) -> i
             print(f"[WARN] cancel_stale_entry_buy_limits_for_symbol: {symbol}: {e}")
 
     return canceled
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional, Tuple, List
+
+@dataclass
+class EntryReplaceState:
+    replaces: int = 0
+    cooldown_until_epoch: float = 0.0
+
+
+def _is_openish(status: str) -> bool:
+    s = (status or "").lower()
+    return ("open" in s) or ("new" in s) or ("pending" in s) or ("accepted" in s)
+
+
+def _open_entry_buy_limit_orders(symbol: str):
+    """Return open-ish BUY LIMIT orders for this symbol."""
+    orders = get_open_orders_for_symbol(symbol)
+    out = []
+    for o in orders:
+        side = str(getattr(o, "side", "")).lower()
+        order_type = str(getattr(o, "order_type", getattr(o, "type", ""))).lower()
+        status = str(getattr(o, "status", ""))
+        if "buy" not in side:
+            continue
+        if "limit" not in order_type:
+            continue
+        if not _is_openish(status):
+            continue
+        out.append(o)
+    return out
+
+
+def replace_stale_entry_buy_limit_if_needed(
+    symbol: str,
+    desired_qty: float,
+    desired_limit_price: float,
+    state: EntryReplaceState,
+    ttl_seconds: int,
+    max_replaces: int,
+    chase_pct: float,
+    extended: bool = False,
+) -> Tuple[bool, EntryReplaceState]:
+    """
+    If there is an existing open BUY LIMIT entry order older than TTL, cancel it and
+    re-submit at a slightly higher price (chasing), up to max_replaces.
+
+    Returns (did_replace, updated_state).
+    """
+    now_utc = datetime.now(timezone.utc)
+
+    open_orders = _open_entry_buy_limit_orders(symbol)
+    if not open_orders:
+        return False, state
+
+    # pick the oldest open entry
+    def order_ts(o):
+        return _order_timestamp_utc(o) or now_utc
+
+    open_orders.sort(key=order_ts)
+    oldest = open_orders[0]
+
+    ts = _order_timestamp_utc(oldest)
+    if ts is None:
+        return False, state
+
+    age_seconds = (now_utc - ts).total_seconds()
+    if age_seconds < ttl_seconds:
+        return False, state
+
+    if state.replaces >= max_replaces:
+        print(f"[ENTRY] {symbol}: stale entry detected but max replaces reached ({state.replaces}/{max_replaces}).")
+        return False, state
+
+    old_limit = float(getattr(oldest, "limit_price", 0) or 0)
+    # chase upward from the *old* price to avoid oscillating if strategy recomputes
+    chased = old_limit * (1.0 + float(chase_pct))
+    new_limit = max(float(desired_limit_price), float(chased))
+
+    print(
+        f"[ENTRY] {symbol}: replacing stale BUY LIMIT. age={age_seconds:.0f}s "
+        f"old_limit={old_limit:.4f} -> new_limit={new_limit:.4f} "
+        f"replace={state.replaces+1}/{max_replaces}"
+    )
+
+    if not cancel_order_by_id_safe(str(oldest.id)):
+        print(f"[WARN] {symbol}: could not cancel stale entry order {oldest.id}; not replacing.")
+        return False, state
+
+    # Submit the replacement order
+    submit_limit_order(
+        symbol=symbol,
+        quantity=desired_qty,
+        side=OrderSide.BUY,
+        limit_price=new_limit,
+        extended=extended,
+    )
+
+    # update state
+    state.replaces += 1
+    return True, state

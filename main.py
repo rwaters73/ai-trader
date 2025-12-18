@@ -15,13 +15,16 @@ from broker import (
     cancel_all_open_orders,
     flatten_all,
     cancel_stale_entry_orders_for_symbol,
+    replace_stale_entry_buy_limit_if_needed, 
+    EntryReplaceState,
 )
+
 from strategy import decide_target_position
 from config import (
     ENTRY_ORDER_TTL_SECONDS,
     ENTRY_MAX_REPLACES,
     ENTRY_REPLACE_CHASE_PCT,
-    ENTRY_RETRY_COOLDOWN_SECONDS,
+    ENTRY_RETRY_COOLDOWN_SECONDS, 
 )
 
 @dataclass
@@ -250,16 +253,16 @@ def main(symbols_to_trade: List[str],
                     continue
 
                 # Check and cancel stale entry orders (BUY only, not exits)
-                try:
-                    canceled = cancel_stale_entry_orders_for_symbol(symbol)
-                    if canceled > 0:
-                        # Set cooldown: do not try to enter this symbol until cooldown expires
-                        now_ts = time.time()
-                        cooldown_until = now_ts + ENTRY_RETRY_COOLDOWN_SECONDS
-                        entry_retry_cooldown[symbol] = cooldown_until
-                        print(f"[cooldown] {symbol}: stale entry order(s) canceled; entry blocked for {ENTRY_RETRY_COOLDOWN_SECONDS}s.")
-                except Exception as e:
-                    print(f"[WARN] cancel_stale_entry_orders failed for {symbol}: {e}")
+                #try:
+                #    canceled = cancel_stale_entry_orders_for_symbol(symbol)
+                #    if canceled > 0:
+                #        # Set cooldown: do not try to enter this symbol until cooldown expires
+                #        now_ts = time.time()
+                #        cooldown_until = now_ts + ENTRY_RETRY_COOLDOWN_SECONDS
+                #        entry_retry_cooldown[symbol] = cooldown_until
+                #        print(f"[cooldown] {symbol}: stale entry order(s) canceled; entry blocked for {ENTRY_RETRY_COOLDOWN_SECONDS}s.")
+                #except Exception as e:
+                #    print(f"[WARN] cancel_stale_entry_orders failed for {symbol}: {e}")
 
                 st = _entry_replace_state.get(symbol)
                 now_epoch = time.time()
@@ -273,6 +276,29 @@ def main(symbols_to_trade: List[str],
                 except Exception as e:
                     print(f"[WARN] Strategy error for {symbol}: {e}")
                     continue
+
+                # TTL cancel + replace for stale entry BUY LIMITs (extended-hours allowed)
+                is_flat = abs(state.position_qty) < 1e-6
+                wants_entry = is_flat and target.target_qty > 0 and (target.entry_type or "").lower() == "limit" and target.entry_limit_price is not None
+
+                if wants_entry and state.has_open_orders:
+                    st = _entry_replace_state.get(symbol, EntryReplaceState())
+
+                    did_replace, st = replace_stale_entry_buy_limit_if_needed(
+                        symbol=symbol,
+                        desired_qty=target.target_qty,              # since state is flat, delta == target
+                        desired_limit_price=target.entry_limit_price,
+                        state=st,
+                        ttl_seconds=ENTRY_ORDER_TTL_SECONDS,
+                        max_replaces=ENTRY_MAX_REPLACES,
+                        chase_pct=ENTRY_REPLACE_CHASE_PCT,
+                        extended=in_ext,
+                    )
+                    _entry_replace_state[symbol] = st
+
+                    if did_replace:
+                        # Important: skip reconcile this iteration so we do not double-submit
+                        continue
 
                 # Check if we are in cooldown and block new entries
                 now_ts = time.time()

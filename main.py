@@ -167,116 +167,120 @@ def main(symbols_to_trade: List[str],
     # Maps symbol -> timestamp when cooldown expires
     entry_retry_cooldown: dict[str, float] = {}
 
-    for i in range(iterations):
-        loop_dt = _now_central()
-        iso_ts = loop_dt.isoformat(timespec="seconds")
+    try:
+        for i in range(iterations):
+            loop_dt = _now_central()
+            iso_ts = loop_dt.isoformat(timespec="seconds")
 
-        print(f"\n--- Iteration {i + 1}/{iterations} at {iso_ts} ---")
+            print(f"\n--- Iteration {i + 1}/{iterations} at {iso_ts} ---")
 
-        in_rth = is_in_rth(loop_dt)
-        in_ext = not in_rth  # your broker functions already accept extended flag
+            in_rth = is_in_rth(loop_dt)
+            in_ext = not in_rth  # your broker functions already accept extended flag
 
-        if in_rth:
-            print("Within RTH session. Running decision cycles for all symbols...")
-        else:
-            print("Within Extended-hours session. Running decision cycles for all symbols...")
-
-        # Circuit breaker: daily loss limit
-        if has_hit_daily_loss_limit is not None:
-            try:
-                if has_hit_daily_loss_limit():
-                    print("[CIRCUIT] Daily loss limit hit. Cancelling orders and flattening.")
-                    try:
-                        cancel_all_open_orders()
-                    except Exception as e:
-                        print(f"[WARN] cancel_all_open_orders failed: {e}")
-                    try:
-                        flatten_all(symbols_to_trade)
-                    except Exception as e:
-                        print(f"[WARN] flatten_all failed: {e}")
-                    break
-            except Exception as e:
-                print(f"[WARN] Circuit breaker check failed: {e}")
-
-        # EOD policies
-        if is_in_eod_window(loop_dt):
-            print("EOD window active (last 15 minutes of RTH). Applying EOD policies.")
-            print("EOD: Cancelling all open orders before applying EOD policies...")
-            try:
-                cancel_all_open_orders()
-            except Exception as e:
-                print(f"[WARN] Failed to cancel open orders: {e}")
-
-            # Default policy: flatten everything into the close
-            print("EOD: Flattening all symbols...")
-            try:
-                flatten_all(symbols_to_trade)
-            except Exception as e:
-                print(f"[WARN] Failed to flatten all: {e}")
-
-            # Stop after EOD actions
-            break
-
-        # Per-symbol decision cycle
-        for symbol in symbols_to_trade:
-            try:
-                state = build_symbol_state(symbol)
-            except Exception as e:
-                print(f"[WARN] Failed to build state for {symbol}: {e}")
-                continue
-
-            # Check and cancel stale entry orders (BUY only, not exits)
-            try:
-                canceled = cancel_stale_entry_orders_for_symbol(symbol)
-                if canceled > 0:
-                    # Set cooldown: do not try to enter this symbol until cooldown expires
-                    now_ts = time.time()
-                    cooldown_until = now_ts + ENTRY_RETRY_COOLDOWN_SECONDS
-                    entry_retry_cooldown[symbol] = cooldown_until
-                    print(f"[cooldown] {symbol}: stale entry order(s) canceled; entry blocked for {ENTRY_RETRY_COOLDOWN_SECONDS}s.")
-            except Exception as e:
-                print(f"[WARN] cancel_stale_entry_orders failed for {symbol}: {e}")
-
-            try:
-                target = decide_target_position(state)
-            except Exception as e:
-                print(f"[WARN] Strategy error for {symbol}: {e}")
-                continue
-
-            # Check if we are in cooldown and block new entries
-            now_ts = time.time()
-            if symbol in entry_retry_cooldown and now_ts < entry_retry_cooldown[symbol]:
-                if target.target_qty > 0 and state.position_qty == 0:
-                    # Block new entry while in cooldown
-                    from models import TargetPosition
-                    remaining_cooldown = entry_retry_cooldown[symbol] - now_ts
-                    target = TargetPosition(
-                        symbol=symbol,
-                        target_qty=0.0,
-                        reason=f"Entry retry cooldown active ({remaining_cooldown:.1f}s remaining)",
-                        entry_type="market",
-                        entry_limit_price=None,
-                        take_profit_price=None,
-                        stop_loss_price=None,
-                    )
+            if in_rth:
+                print("Within RTH session. Running decision cycles for all symbols...")
             else:
-                # Cooldown expired; clean up
-                entry_retry_cooldown.pop(symbol, None)
+                print("Within Extended-hours session. Running decision cycles for all symbols...")
 
-            try:
-                reconcile_position(state, target, extended=in_ext)
-            except Exception as e:
-                print(f"[WARN] reconcile_position failed for {symbol}: {e}")
-                continue
+            # Circuit breaker: daily loss limit
+            if has_hit_daily_loss_limit is not None:
+                try:
+                    if has_hit_daily_loss_limit():
+                        print("[CIRCUIT] Daily loss limit hit. Cancelling orders and flattening.")
+                        try:
+                            cancel_all_open_orders()
+                        except Exception as e:
+                            print(f"[WARN] cancel_all_open_orders failed: {e}")
+                        try:
+                            flatten_all(symbols_to_trade)
+                        except Exception as e:
+                            print(f"[WARN] flatten_all failed: {e}")
+                        break
+                except Exception as e:
+                    print(f"[WARN] Circuit breaker check failed: {e}")
 
-            # Exit orders management (SL/TP logic lives in broker.py)
-            try:
-                ensure_exit_orders_for_symbol(state, extended=in_ext)
-            except Exception as e:
-                print(f"[WARN] ensure_exit_orders_for_symbol failed for {symbol}: {e}")
-                continue
+            # EOD policies
+            if is_in_eod_window(loop_dt):
+                print("EOD window active (last 15 minutes of RTH). Applying EOD policies.")
+                print("EOD: Cancelling all open orders before applying EOD policies...")
+                try:
+                    cancel_all_open_orders()
+                except Exception as e:
+                    print(f"[WARN] Failed to cancel open orders: {e}")
 
-        time.sleep(interval_seconds)
+                # Default policy: flatten everything into the close
+                print("EOD: Flattening all symbols...")
+                try:
+                    flatten_all(symbols_to_trade)
+                except Exception as e:
+                    print(f"[WARN] Failed to flatten all: {e}")
+
+                # Stop after EOD actions
+                break
+
+            # Per-symbol decision cycle
+            for symbol in symbols_to_trade:
+                try:
+                    state = build_symbol_state(symbol)
+                except Exception as e:
+                    print(f"[WARN] Failed to build state for {symbol}: {e}")
+                    continue
+
+                # Check and cancel stale entry orders (BUY only, not exits)
+                try:
+                    canceled = cancel_stale_entry_orders_for_symbol(symbol)
+                    if canceled > 0:
+                        # Set cooldown: do not try to enter this symbol until cooldown expires
+                        now_ts = time.time()
+                        cooldown_until = now_ts + ENTRY_RETRY_COOLDOWN_SECONDS
+                        entry_retry_cooldown[symbol] = cooldown_until
+                        print(f"[cooldown] {symbol}: stale entry order(s) canceled; entry blocked for {ENTRY_RETRY_COOLDOWN_SECONDS}s.")
+                except Exception as e:
+                    print(f"[WARN] cancel_stale_entry_orders failed for {symbol}: {e}")
+
+                try:
+                    target = decide_target_position(state)
+                except Exception as e:
+                    print(f"[WARN] Strategy error for {symbol}: {e}")
+                    continue
+
+                # Check if we are in cooldown and block new entries
+                now_ts = time.time()
+                if symbol in entry_retry_cooldown and now_ts < entry_retry_cooldown[symbol]:
+                    if target.target_qty > 0 and state.position_qty == 0:
+                        # Block new entry while in cooldown
+                        from models import TargetPosition
+                        remaining_cooldown = entry_retry_cooldown[symbol] - now_ts
+                        target = TargetPosition(
+                            symbol=symbol,
+                            target_qty=0.0,
+                            reason=f"Entry retry cooldown active ({remaining_cooldown:.1f}s remaining)",
+                            entry_type="market",
+                            entry_limit_price=None,
+                            take_profit_price=None,
+                            stop_loss_price=None,
+                        )
+                else:
+                    # Cooldown expired; clean up
+                    entry_retry_cooldown.pop(symbol, None)
+
+                try:
+                    reconcile_position(state, target, extended=in_ext)
+                except Exception as e:
+                    print(f"[WARN] reconcile_position failed for {symbol}: {e}")
+                    continue
+
+                # Exit orders management (SL/TP logic lives in broker.py)
+                try:
+                    ensure_exit_orders_for_symbol(state, extended=in_ext)
+                except Exception as e:
+                    print(f"[WARN] ensure_exit_orders_for_symbol failed for {symbol}: {e}")
+                    continue
+
+            time.sleep(interval_seconds)
+
+    except KeyboardInterrupt:
+        print("\n\n[EXIT] Ctrl+C received. Exiting gracefully.")
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ from config import (
     BRACKET_SL_PERCENT_BY_SYMBOL,
     DEFAULT_BRACKET_SL_PERCENT,
     ATR_PERIOD_DEFAULT,
-    ATR_MULTIPLIER_SL_DEFAULT,
+    ATR_STOP_MULTIPLIER_DEFAULT,
     ATR_TP_MULTIPLIER_DEFAULT,
     MAX_ENTRY_ORDER_AGE_MINUTES,
     RISK_LIMITED_STARTING_CASH,
@@ -850,7 +850,7 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
     Behavior:
       - Only handles LONG positions (position_qty > 0).
       - Uses ATR to compute SL and TP:
-            SL  = avg_entry_price - ATR_MULTIPLIER_SL_DEFAULT * ATR
+            SL  = avg_entry_price - ATR_STOP_MULTIPLIER_DEFAULT * ATR
             TP  = avg_entry_price + ATR_TP_MULTIPLIER_DEFAULT * ATR
       - If ATR cannot be computed for any reason, falls back to
         percentage-based exits from BRACKET_TP_PERCENT_BY_SYMBOL and
@@ -894,10 +894,10 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
         return
 
     # Compute stop-loss price only
-    stop_loss_price = last_price - atr_value * ATR_MULTIPLIER_SL_DEFAULT
+    stop_loss_price = last_price - atr_value * ATR_STOP_MULTIPLIER_DEFAULT
     print(
         f"{symbol}: Using ATR-based stop-loss. Last price={last_price:.2f}, ATR={atr_value:.2f}, "
-        f"SL={stop_loss_price:.2f} (SL_mult={ATR_MULTIPLIER_SL_DEFAULT})."
+        f"SL={stop_loss_price:.2f} (SL_mult={ATR_STOP_MULTIPLIER_DEFAULT})."
     )
 
     # Submit only the STOP order

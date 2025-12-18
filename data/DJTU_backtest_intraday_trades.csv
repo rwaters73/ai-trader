@@ -1,0 +1,2 @@
+symbol,entry_date,exit_date,entry_price,exit_price,quantity,pnl_dollars,pnl_percent,holding_days
+DJTU,2025-12-04 05:00:00+00:00,2025-12-05 05:00:00+00:00,3.42,3.39580082385512,29239.0,-707.5597113001427,-0.7075782498502887,1

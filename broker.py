@@ -923,3 +923,77 @@ def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) ->
             f"{symbol}: SL order not placed (see warnings above). "
             f"Intended stop_price was {stop_loss_price:.2f}."
         )
+
+
+def _order_timestamp_utc(order) -> Optional[datetime]:
+    """
+    Return the best available order timestamp in UTC.
+    alpaca-py order objects commonly have submitted_at, created_at.
+    """
+    ts = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
+    if ts is None:
+        return None
+    # Ensure tz-aware UTC
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+def cancel_order_by_id_safe(order_id: str) -> bool:
+    try:
+        _trading_client.cancel_order_by_id(order_id)
+        return True
+    except Exception as e:
+        print(f"[WARN] Failed to cancel order {order_id}: {e}")
+        return False
+
+def cancel_stale_entry_buy_limits_for_symbol(symbol: str, ttl_seconds: int) -> int:
+    """
+    Cancels stale OPEN BUY LIMIT orders for this symbol.
+    Only intended for entry orders. Does not touch SELL exits.
+    Returns number canceled.
+    """
+    open_orders = get_open_orders_for_symbol(symbol)
+    now_utc = datetime.now(timezone.utc)
+
+    canceled = 0
+    for o in open_orders:
+        try:
+            side = str(o.side).lower()
+            order_type = str(getattr(o, "order_type", getattr(o, "type", ""))).lower()
+            status = str(getattr(o, "status", "")).lower()
+
+            if "buy" not in side:
+                continue
+            if "limit" not in order_type:
+                continue
+            if "open" not in status and "new" not in status and "pending" not in status:
+                # Keep it conservative: only handle clearly-open-ish orders
+                continue
+
+            submitted_at = _order_timestamp_utc(o)
+            if submitted_at is None:
+                continue
+
+            age_seconds = (now_utc - submitted_at).total_seconds()
+            if age_seconds < ttl_seconds:
+                continue
+
+            print(f"[ENTRY] {symbol}: Canceling stale BUY LIMIT {o.id} age={age_seconds:.0f}s")
+            if cancel_order_by_id_safe(str(o.id)):
+                canceled += 1
+                # Log cancel to DB if you already do elsewhere
+                try:
+                    log_order_event_to_db(
+                        alpaca_order_id=str(o.id),
+                        event_type="canceled",
+                        filled_qty=float(getattr(o, "filled_qty", 0) or 0),
+                        remaining_qty=float(float(getattr(o, "qty", 0) or 0) - float(getattr(o, "filled_qty", 0) or 0)),
+                        status="canceled",
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"[WARN] cancel_stale_entry_buy_limits_for_symbol: {symbol}: {e}")
+
+    return canceled

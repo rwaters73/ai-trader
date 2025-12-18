@@ -115,9 +115,16 @@ BRACKET_SL_PCT_BY_SYMBOL = {
 
 # Live trading flag: default is False (safety).
 # You can override via environment variable LIVE_TRADING_ENABLED=true
-LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() in ("1", "true", "yes")
+#LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() in ("1", "true", "yes")
+LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "true").lower() in ("1", "true", "yes")
 
-ENTRY_ORDER_TTL_SECONDS = 120
+
+# Entry order management
+ENTRY_ORDER_TTL_SECONDS = 120              # cancel/replace after 2 minutes
+ENTRY_MAX_REPLACES = 3                     # max number of replace attempts per entry signal
+ENTRY_REPLACE_CHASE_PCT = 0.50             # how far we allow limit to "chase" per replace (percent)
+ENTRY_RETRY_COOLDOWN_SECONDS = 300         # after max replaces, stop trying for 5 minutes
+ENTRY_REPLACE_PRICE_SOURCE = "ask"         # "ask" preferred, fallback to bid
 
 # ==========================================================
 # ATR based stop loss and take profit configuration

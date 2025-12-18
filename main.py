@@ -4,6 +4,7 @@ import time
 from datetime import datetime, time as dtime
 from pathlib import Path
 from typing import List, Optional
+from dataclasses import dataclass
 
 import pytz
 
@@ -16,7 +17,19 @@ from broker import (
     cancel_stale_entry_orders_for_symbol,
 )
 from strategy import decide_target_position
-from config import ENTRY_RETRY_COOLDOWN_SECONDS
+from config import (
+    ENTRY_ORDER_TTL_SECONDS,
+    ENTRY_MAX_REPLACES,
+    ENTRY_REPLACE_CHASE_PCT,
+    ENTRY_RETRY_COOLDOWN_SECONDS,
+)
+
+@dataclass
+class EntryReplaceState:
+    replaces: int = 0
+    cooldown_until_epoch: float = 0.0
+
+_entry_replace_state: dict[str, EntryReplaceState] = {}
 
 # Circuit breakers (safe if you added them, optional if you did not)
 try:
@@ -163,6 +176,16 @@ def main(symbols_to_trade: List[str],
     print("Trading-hours filter: 8:30–15:00 Central, Mon–Fri.")
     print()
 
+    # Capture session start equity for circuit breaker checks
+    session_start_equity = 0.0
+    if has_hit_daily_loss_limit is not None:
+        try:
+            from circuit_breakers import get_current_equity
+            session_start_equity = get_current_equity()
+            print(f"Session start equity: ${session_start_equity:.2f}")
+        except Exception as e:
+            print(f"[WARN] Could not capture session start equity: {e}")
+
     # Track per-symbol cooldown after stale entry cancellation
     # Maps symbol -> timestamp when cooldown expires
     entry_retry_cooldown: dict[str, float] = {}
@@ -185,7 +208,7 @@ def main(symbols_to_trade: List[str],
             # Circuit breaker: daily loss limit
             if has_hit_daily_loss_limit is not None:
                 try:
-                    if has_hit_daily_loss_limit():
+                    if has_hit_daily_loss_limit(session_start_equity):
                         print("[CIRCUIT] Daily loss limit hit. Cancelling orders and flattening.")
                         try:
                             cancel_all_open_orders()
@@ -237,6 +260,13 @@ def main(symbols_to_trade: List[str],
                         print(f"[cooldown] {symbol}: stale entry order(s) canceled; entry blocked for {ENTRY_RETRY_COOLDOWN_SECONDS}s.")
                 except Exception as e:
                     print(f"[WARN] cancel_stale_entry_orders failed for {symbol}: {e}")
+
+                st = _entry_replace_state.get(symbol)
+                now_epoch = time.time()
+                if st and now_epoch < st.cooldown_until_epoch:
+                    remaining = int(st.cooldown_until_epoch - now_epoch)
+                    print(f"[ENTRY] {symbol}: cooldown active ({remaining}s). Skipping.")
+                    continue
 
                 try:
                     target = decide_target_position(state)

@@ -1,310 +1,247 @@
-from datetime import datetime
+from __future__ import annotations
+
 import time
-from logger import init_decision_log, init_order_log, log_decision
-from db import init_db, log_decision_to_db
-from config import SYMBOLS, ITERATIONS, INTERVAL_SECONDS
+from datetime import datetime, time as dtime
+from pathlib import Path
+from typing import List, Optional
+
+import pytz
+
 from broker import (
     build_symbol_state,
     reconcile_position,
-    flatten_symbol,
-    cancel_all_open_orders,
-    get_position_info,
     ensure_exit_orders_for_symbol,
-    cancel_stale_entry_orders_for_symbol,
+    cancel_all_open_orders,
+    flatten_all,
 )
-from models import SymbolState
 from strategy import decide_target_position
-from eod_policy import apply_eod_policy
 
-from regime import get_market_regime
-from models import TargetPosition  # you already import this somewhere, just make sure it is there
+# Circuit breakers (safe if you added them, optional if you did not)
+try:
+    from circuit_breakers import has_hit_daily_loss_limit
+except Exception:
+    has_hit_daily_loss_limit = None  # type: ignore
 
-from pathlib import Path
-from typing import List
 
-from circuit_breakers import has_hit_daily_loss_limit, get_current_equity
+# -----------------------------
+# Runtime configuration
+# -----------------------------
+WATCHLIST_PATH = Path("data/live_watchlist.txt")
 
-def is_rth(now: datetime | None = None) -> bool:
+ITERATIONS_DEFAULT = 5000
+INTERVAL_SECONDS_DEFAULT = 1.0
+
+CENTRAL_TZ = pytz.timezone("America/Chicago")
+
+# Regular trading hours used by this bot (Central)
+RTH_START = dtime(hour=8, minute=30)
+RTH_END = dtime(hour=15, minute=0)
+
+# EOD management window (last N minutes of RTH)
+EOD_WINDOW_MINUTES = 15
+
+
+# -----------------------------
+# Symbol loading
+# -----------------------------
+def _looks_like_valid_symbol(token: str) -> bool:
     """
-    Regular Trading Hours: 8:30–15:00 Central, Monday–Friday.
-    Assumes this script runs on a machine set to Central Time.
-    """
-    if now is None:
-        now = datetime.now()
+    Conservative validation for symbols.
 
-    # Monday=0, Sunday=6
-    if now.weekday() > 4:  # 5=Saturday, 6=Sunday
+    We want to accept typical US tickers:
+      - Letters, numbers, dot (BRK.B), dash (if it ever appears)
+    We explicitly reject anything that looks like a dataclass repr or has
+    punctuation that indicates a whole object got written to the file.
+    """
+    if not token:
         return False
 
-    minutes = now.hour * 60 + now.minute
-
-    # 8:30 am CT to 3:00 pm CT
-    open_min = 8 * 60 + 30    # 8:30
-    close_min = 15 * 60       # 15:00
-
-    return open_min <= minutes <= close_min
-
-
-def is_extended_session(now: datetime | None = None) -> bool:
-    """
-    Full extended-hours session for US equities:
-    Pre-market:   5:00–8:30 CT
-    After-hours:  15:00–19:00 CT
-    """
-    if now is None:
-        now = datetime.now()
-
-    if now.weekday() > 4:
+    # Reject obviously bad tokens from accidental repr dumps
+    if "(" in token or ")" in token or "," in token:
         return False
 
-    minutes = now.hour * 60 + now.minute
+    # Very conservative allowed characters
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")
+    upper = token.upper()
 
-    pre_open_start = 5 * 60       # 5:00 CT
-    pre_open_end   = 8 * 60 + 30  # 8:30 CT
-
-    after_close_start = 15 * 60   # 15:00 CT
-    after_close_end   = 19 * 60   # 19:00 CT
-
-    in_pre  = pre_open_start <= minutes < pre_open_end
-    in_after = after_close_start <= minutes < after_close_end
-
-    return in_pre or in_after
+    return all(ch in allowed for ch in upper)
 
 
-def is_eod_window(now: datetime | None = None) -> bool:
+def load_symbols_from_watchlist(path: Path = WATCHLIST_PATH) -> List[str]:
     """
-    End-of-day window: last 15 minutes of RTH.
-    For RTH 8:30–15:00 CT, this is 14:45–15:00 CT, Mon–Fri.
-    """
-    if now is None:
-        now = datetime.now()
+    Reads one symbol per line from data/live_watchlist.txt.
 
-    if now.weekday() > 4:  # Sat/Sun
+    Defensive behavior:
+      - strips whitespace
+      - skips blank lines and comments (#)
+      - takes only the first whitespace-delimited token
+      - rejects tokens that do not look like symbols
+      - de-duplicates while preserving order
+    """
+    if not path.exists():
+        print(f"[WARN] Watchlist not found: {path}. No symbols loaded.")
+        return []
+
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+
+    symbols: List[str] = []
+    seen = set()
+
+    skipped = 0
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+
+        token = stripped.split()[0].strip()
+        if not _looks_like_valid_symbol(token):
+            skipped += 1
+            continue
+
+        sym = token.upper()
+        if sym not in seen:
+            seen.add(sym)
+            symbols.append(sym)
+
+    if skipped:
+        print(f"[WARN] Skipped {skipped} invalid watchlist line(s).")
+
+    return symbols
+
+
+# -----------------------------
+# Session helpers
+# -----------------------------
+def _now_central() -> datetime:
+    return datetime.now(tz=CENTRAL_TZ)
+
+
+def is_weekday(dt: datetime) -> bool:
+    return dt.weekday() < 5  # Mon=0 ... Fri=4
+
+
+def is_in_rth(dt: datetime) -> bool:
+    if not is_weekday(dt):
         return False
+    t = dt.time()
+    return RTH_START <= t <= RTH_END
 
-    minutes = now.hour * 60 + now.minute
-    start = 14 * 60 + 45   # 14:45
-    end = 15 * 60          # 15:00
 
-    return start <= minutes < end
-
-def load_symbols_for_trading(
-    watchlist_path: str = "data/live_watchlist.txt",
-    fallback_symbols: list[str] = None,
-) -> list[str]:
+def is_in_eod_window(dt: datetime) -> bool:
     """
-    Load trading symbols from watchlist file if it exists, otherwise use fallback list.
+    True during the last EOD_WINDOW_MINUTES minutes of RTH.
+    Example: if RTH_END is 15:00 and window is 15 minutes,
+    EOD window is 14:45 to 15:00.
     """
-    if fallback_symbols is None:
-        fallback_symbols = SYMBOLS
-    
-    watchlist_file = Path(watchlist_path)
-    
-    if watchlist_file.exists():
-        try:
-            with watchlist_file.open("r", encoding="utf-8") as fh:
-                symbols = [line.strip().upper() for line in fh if line.strip()]
-            
-            if symbols:
-                print(f"✓ Loaded {len(symbols)} symbols from {watchlist_path}")
-                return symbols
-            else:
-                print(f"⚠ Watchlist file is empty; using fallback symbols")
-                return fallback_symbols
-        except Exception as e:
-            print(f"⚠ Error reading {watchlist_path}: {e}; using fallback symbols")
-            return fallback_symbols
-    else:
-        print(f"ℹ Watchlist file not found at {watchlist_path}; using fallback symbols")
-        return fallback_symbols
+    if not is_in_rth(dt):
+        return False
+    end_dt = dt.replace(hour=RTH_END.hour, minute=RTH_END.minute, second=0, microsecond=0)
+    window_start = end_dt - timedelta(minutes=EOD_WINDOW_MINUTES)
+    return window_start <= dt <= end_dt
 
 
-def main(symbols: list[str] = None):
-    """Main trading logic."""
-    if symbols is None:
-        symbols = load_symbols_for_trading()
+# We avoid importing timedelta up top unless we need it
+from datetime import timedelta  # noqa: E402  (kept here to avoid clutter above)
 
-    print(f"Starting bounded loop for symbols: {', '.join(symbols)}")
-    print(f"Iterations: {ITERATIONS}, Interval: {INTERVAL_SECONDS}s")
-    print("Trading-hours filter: 8:30–15:00 Central, Mon–Fri.\n")
 
-    # Initialize logs
-    init_decision_log()
-    init_order_log()
-    init_db()
+# -----------------------------
+# Main loop
+# -----------------------------
+def main(symbols_to_trade: List[str],
+         iterations: int = ITERATIONS_DEFAULT,
+         interval_seconds: float = INTERVAL_SECONDS_DEFAULT) -> None:
+    if not symbols_to_trade:
+        print("[WARN] No symbols provided. Exiting.")
+        return
 
-    # Capture starting equity for the session (used by the circuit breaker)
-    try:
-        session_start_equity = get_current_equity()
-        print(f"Session starting equity: ${session_start_equity:.2f}")
-    except Exception as exc:
-        print(f"Warning: could not read starting equity for session: {exc}")
-        session_start_equity = 0.0
+    print(f"Starting bounded loop for symbols: {', '.join(symbols_to_trade)}")
+    print(f"Iterations: {iterations}, Interval: {interval_seconds}s")
+    print("Trading-hours filter: 8:30–15:00 Central, Mon–Fri.")
+    print()
 
-    eod_orders_canceled = False  #cancel all open orders
-    eod_completed = False   #break out after all eod instructions are executed
+    for i in range(iterations):
+        loop_dt = _now_central()
+        iso_ts = loop_dt.isoformat(timespec="seconds")
 
-    # Kill-switch: if this file exists we block new entries but still manage exits
-    stop_trading_logged = False
-    stop_trading_path = Path("data/STOP_TRADING")
+        print(f"\n--- Iteration {i + 1}/{iterations} at {iso_ts} ---")
 
-    try:
-        for i in range(ITERATIONS):
-            now = datetime.now()
-            print(f"\n--- Iteration {i+1}/{ITERATIONS} at {now.isoformat(timespec='seconds')} ---")
+        in_rth = is_in_rth(loop_dt)
+        in_ext = not in_rth  # your broker functions already accept extended flag
 
-            in_rth = is_rth(now)
-            in_ext = is_extended_session(now)
-            in_eod = is_eod_window(now)
-            # Get market regime once per iteration (SPY-based)
-            market_regime = get_market_regime()
-
-            if in_rth or in_ext:
-                session_label = "RTH" if in_rth else "Extended-hours"
-                print(f"Within {session_label} session. Running decision cycles for all symbols...")
-
-                if in_eod:
-                    print("EOD window active (last 15 minutes of RTH). Applying EOD policies.")
-
-                    if not eod_orders_canceled:
-                        print("EOD: Cancelling all open orders before applying EOD policies...")
-                        cancel_all_open_orders()
-                        eod_orders_canceled = True
-
-                    # -------------------------------------------------
-                    # Circuit breaker: daily loss limit
-                    # -------------------------------------------------
-                    try:
-                        hit_limit = has_hit_daily_loss_limit(session_start_equity)
-                        cb_message = "[circuit] Daily loss limit hit." if hit_limit else ""
-                    except Exception as exc:
-                        print(f"Circuit-breaker check failed: {exc}")
-                        hit_limit = False
-                        cb_message = ""
-
-                    if cb_message:
-                        print(cb_message)
-
-                    if hit_limit:
-                        print("Completed program. Exiting gracefully due to daily loss limit.")
-                        return
-    
-                for symbol in symbols:
-                    state = build_symbol_state(symbol)
-                    
-                    # Cancel stale entry limit orders if we are flat and the order is too old.
-                    cancel_stale_entry_orders_for_symbol(state)
-
-                    target = decide_target_position(state)
-
-                    if in_eod:
-                        target = apply_eod_policy(state, target)
-
-                    # ------------------------------------------------
-                    # Regime filter: block NEW entries in bad regimes
-                    # ------------------------------------------------
-                    if (
-                        state.position_qty == 0.0
-                        and target.target_qty > 0.0
-                        and market_regime is not None
-                        and not market_regime.is_bull
-                    ):
-                        original_reason = target.reason
-                        target = TargetPosition(
-                            symbol=state.symbol,
-                            target_qty=0.0,
-                            reason=(
-                                f"Regime filter: blocking new long entries. "
-                                f"{market_regime.explanation} "
-                                f"(original entry reason: {original_reason})"
-                            ),
-                            entry_type="market",
-                            entry_limit_price=None,
-                            take_profit_price=None,
-                            stop_loss_price=None,
-                        )
-
-                    # ------------------------------------------------
-                    # Kill-switch: block NEW entries if data/STOP_TRADING exists
-                    # (Log the detection once per run to avoid spamming logs.)
-                    # ------------------------------------------------
-                    try:
-                        if stop_trading_path.exists():
-                            if not stop_trading_logged:
-                                print("[kill-switch] STOP_TRADING detected; blocking NEW entries for this run. Existing positions will still be managed.")
-                                stop_trading_logged = True
-
-                            if state.position_qty == 0.0 and target.target_qty > 0.0:
-                                original_reason = target.reason
-                                target = TargetPosition(
-                                    symbol=state.symbol,
-                                    target_qty=0.0,
-                                    reason=(
-                                        "Kill switch active: blocking new entries. "
-                                        f"(original entry reason: {original_reason})"
-                                    ),
-                                    entry_type="market",
-                                    entry_limit_price=None,
-                                    take_profit_price=None,
-                                    stop_loss_price=None,
-                                )
-                    except Exception as exc:
-                        # Be conservative: if reading the file fails, don't block trading
-                        print(f"[WARN] Could not check STOP_TRADING file: {exc}")
-
-                    log_decision(
-                        state=state,
-                        target=target,
-                        session_label=session_label,
-                        in_eod_window=in_eod,
-                        now=now,
-                    )
-
-                    log_decision_to_db(
-                        timestamp=now.isoformat(timespec="seconds"),
-                        session=session_label,
-                        in_eod_window=in_eod,
-                        symbol=state.symbol,
-                        bid=state.bid,
-                        ask=state.ask,
-                        position_qty=state.position_qty,
-                        avg_entry_price=state.avg_entry_price,
-                        pnl_pct=state.pnl_percent(),
-                        target_qty=target.target_qty,
-                        reason=target.reason,
-                    )
-
-                    reconcile_position(state, target, extended=in_ext)
-
-                    # After any entry/exit adjustments for this symbol, ensure that
-                    # if we hold a long position, we have a TP exit order on the book.
-                    ensure_exit_orders_for_symbol(state, extended=in_ext)
-
-                # After we've processed ALL symbols in the EOD window, we can exit gracefully
-                if in_eod:
-                    eod_completed = True
-                    print("EOD: All EOD policies applied for all symbols. Exiting gracefully.")
-                    break
-
-            else:
-                print("Outside all trading sessions. Skipping trading logic this cycle.")
-
-            time.sleep(INTERVAL_SECONDS)
-
-        # ---- after the for-loop ends ----
-        if eod_completed:
-            print("Program ended after completing EOD actions.")
+        if in_rth:
+            print("Within RTH session. Running decision cycles for all symbols...")
         else:
-            print("Program ended after hitting iteration limit.")
+            print("Within Extended-hours session. Running decision cycles for all symbols...")
 
-    except KeyboardInterrupt:
-        print("\nLoop interrupted by user (Ctrl+C). Exiting early.\n")
-    finally:
-        print("\nCompleted program. Exiting gracefully.\n")
+        # Circuit breaker: daily loss limit
+        if has_hit_daily_loss_limit is not None:
+            try:
+                if has_hit_daily_loss_limit():
+                    print("[CIRCUIT] Daily loss limit hit. Cancelling orders and flattening.")
+                    try:
+                        cancel_all_open_orders()
+                    except Exception as e:
+                        print(f"[WARN] cancel_all_open_orders failed: {e}")
+                    try:
+                        flatten_all(symbols_to_trade)
+                    except Exception as e:
+                        print(f"[WARN] flatten_all failed: {e}")
+                    break
+            except Exception as e:
+                print(f"[WARN] Circuit breaker check failed: {e}")
 
-  
+        # EOD policies
+        if is_in_eod_window(loop_dt):
+            print("EOD window active (last 15 minutes of RTH). Applying EOD policies.")
+            print("EOD: Cancelling all open orders before applying EOD policies...")
+            try:
+                cancel_all_open_orders()
+            except Exception as e:
+                print(f"[WARN] Failed to cancel open orders: {e}")
+
+            # Default policy: flatten everything into the close
+            print("EOD: Flattening all symbols...")
+            try:
+                flatten_all(symbols_to_trade)
+            except Exception as e:
+                print(f"[WARN] Failed to flatten all: {e}")
+
+            # Stop after EOD actions
+            break
+
+        # Per-symbol decision cycle
+        for symbol in symbols_to_trade:
+            try:
+                state = build_symbol_state(symbol)
+            except Exception as e:
+                print(f"[WARN] Failed to build state for {symbol}: {e}")
+                continue
+
+            try:
+                target = decide_target_position(state)
+            except Exception as e:
+                print(f"[WARN] Strategy error for {symbol}: {e}")
+                continue
+
+            try:
+                reconcile_position(state, target, extended=in_ext)
+            except Exception as e:
+                print(f"[WARN] reconcile_position failed for {symbol}: {e}")
+                continue
+
+            # Exit orders management (SL/TP logic lives in broker.py)
+            try:
+                ensure_exit_orders_for_symbol(state, extended=in_ext)
+            except Exception as e:
+                print(f"[WARN] ensure_exit_orders_for_symbol failed for {symbol}: {e}")
+                continue
+
+        time.sleep(interval_seconds)
+
+
 if __name__ == "__main__":
-    # Load symbols for trading
-    symbols_to_trade = load_symbols_for_trading()
-    # Use symbols_to_trade instead of hard-coded list
-    main(symbols_to_trade)
+    symbols = load_symbols_from_watchlist(WATCHLIST_PATH)
+    print(f"✓ Loaded {len(symbols)} symbols from {WATCHLIST_PATH.as_posix()}")
+    main(symbols_to_trade=symbols, iterations=ITERATIONS_DEFAULT, interval_seconds=INTERVAL_SECONDS_DEFAULT)

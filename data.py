@@ -3,6 +3,7 @@ from typing import Optional
 
 import pandas as pd
 import requests
+
 from alpaca.common.exceptions import APIError
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest, StockBarsRequest
@@ -14,6 +15,9 @@ from config import (
     INTRADAY_LOOKBACK_MINUTES,
     INTRADAY_BAR_SIZE_MINUTES,
 )
+
+import socket
+socket.setdefaulttimeout(15)  # seconds; prevents Alpaca calls from hanging forever
 
 # -------------------------------------------------------------------
 # Shared Alpaca data client
@@ -117,17 +121,14 @@ def get_latest_quote(symbol: str):
 def get_recent_history(symbol: str, lookback_days: int = 60) -> Optional[pd.DataFrame]:
     """
     Fetch recent DAILY bars for the given symbol over the last `lookback_days`.
-    Returns a pandas DataFrame or None if data cannot be fetched.
-
-    This function is hardened against Alpaca API errors (e.g., 500s) so the
-    trading loop does not crash if Alpaca has a temporary issue.
+    Returns a pandas DataFrame (possibly empty). Never raises on transient API/network issues.
     """
     end_timestamp = datetime.now(timezone.utc)
     start_timestamp = end_timestamp - timedelta(days=lookback_days)
 
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
-        timeframe=TimeFrame(1, TimeFrameUnit.Day),  # 1-day bars
+        timeframe=TimeFrame(1, TimeFrameUnit.Day),
         start=start_timestamp,
         end=end_timestamp,
         feed="iex",
@@ -135,58 +136,30 @@ def get_recent_history(symbol: str, lookback_days: int = 60) -> Optional[pd.Data
 
     try:
         bars_response = _data_client.get_stock_bars(request)
+    except (APIError, requests.RequestException, TimeoutError, OSError) as e:
+        # IMPORTANT: return empty DF so strategy stays flat instead of crashing
+        print(f"[WARN] get_recent_history failed for {symbol}: {e}")
+        return pd.DataFrame()
 
-    except APIError as api_error:
-        print(
-            f"[WARN] Alpaca APIError while fetching DAILY bars for {symbol}: "
-            f"{api_error}. Returning None."
-        )
-        return None
-
-    except requests.exceptions.HTTPError as http_error:
-        print(
-            f"[WARN] HTTPError while fetching DAILY bars for {symbol}: "
-            f"{http_error}. Returning None."
-        )
-        return None
-
-    except Exception as unexpected_error:
-        print(
-            f"[WARN] Unexpected error fetching DAILY bars for {symbol}: "
-            f"{unexpected_error}. Returning None."
-        )
-        return None
-
-    # ----------------------------
-    # Convert response → DataFrame
-    # ----------------------------
     if hasattr(bars_response, "df"):
         daily_bars_data_frame = bars_response.df
     else:
         try:
             daily_bars_data_frame = pd.DataFrame(bars_response)
         except Exception:
-            return None
+            return pd.DataFrame()
 
-    if daily_bars_data_frame is None or daily_bars_data_frame.empty:
-        return None
+    if daily_bars_data_frame.empty:
+        return daily_bars_data_frame
 
-    # Handle MultiIndex (symbol, timestamp)
     if (
         isinstance(daily_bars_data_frame.index, pd.MultiIndex)
         and "symbol" in daily_bars_data_frame.index.names
     ):
         daily_bars_data_frame = daily_bars_data_frame.xs(symbol, level="symbol")
 
-    # Always sort chronologically
-    daily_bars_data_frame = daily_bars_data_frame.sort_index()
+    return daily_bars_data_frame.sort_index()
 
-    return daily_bars_data_frame
-
-
-# -------------------------------------------------------------------
-# Intraday history (used for confirmation)
-# -------------------------------------------------------------------
 
 def get_intraday_history(
     symbol: str,
@@ -195,13 +168,7 @@ def get_intraday_history(
 ) -> pd.DataFrame:
     """
     Fetch recent INTRADAY OHLCV bars for `symbol`.
-
-    - lookback_minutes: how far back to fetch (e.g., last 60 minutes).
-    - bar_size_minutes: bar size in minutes (e.g., 5-minute bars).
-
-    Returns:
-        A pandas DataFrame indexed by timestamp, with OHLCV columns.
-        Returns an empty DataFrame on errors.
+    Returns a pandas DataFrame (possibly empty). Never raises on transient API/network issues.
     """
     end_timestamp = datetime.now(timezone.utc)
     start_timestamp = end_timestamp - timedelta(minutes=lookback_minutes)
@@ -216,26 +183,8 @@ def get_intraday_history(
 
     try:
         bars_response = _data_client.get_stock_bars(request)
-
-    except APIError as api_error:
-        print(
-            f"[WARN] Alpaca APIError while fetching INTRADAY bars for {symbol}: "
-            f"{api_error}. Returning empty DataFrame."
-        )
-        return pd.DataFrame()
-
-    except requests.exceptions.HTTPError as http_error:
-        print(
-            f"[WARN] HTTPError while fetching INTRADAY bars for {symbol}: "
-            f"{http_error}. Returning empty DataFrame."
-        )
-        return pd.DataFrame()
-
-    except Exception as unexpected_error:
-        print(
-            f"[WARN] Unexpected error fetching INTRADAY bars for {symbol}: "
-            f"{unexpected_error}. Returning empty DataFrame."
-        )
+    except (APIError, requests.RequestException, TimeoutError, OSError) as e:
+        print(f"[WARN] get_intraday_history failed for {symbol}: {e}")
         return pd.DataFrame()
 
     if hasattr(bars_response, "df"):
@@ -249,13 +198,10 @@ def get_intraday_history(
     if intraday_bars_data_frame.empty:
         return intraday_bars_data_frame
 
-    # Handle MultiIndex (symbol, timestamp)
     if (
         isinstance(intraday_bars_data_frame.index, pd.MultiIndex)
         and "symbol" in intraday_bars_data_frame.index.names
     ):
         intraday_bars_data_frame = intraday_bars_data_frame.xs(symbol, level="symbol")
 
-    intraday_bars_data_frame = intraday_bars_data_frame.sort_index()
-
-    return intraday_bars_data_frame
+    return intraday_bars_data_frame.sort_index()

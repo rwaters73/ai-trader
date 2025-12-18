@@ -42,6 +42,10 @@ MAX_ENTRY_ORDER_AGE_MINUTES = 15
 # than this TTL it will be canceled to avoid stale entries. Default: 120s
 ENTRY_ORDER_TTL_SECONDS = int(os.getenv("ENTRY_ORDER_TTL_SECONDS", "120"))
 
+# Cooldown period (in seconds) after canceling a stale entry order before
+# we attempt to enter the same symbol again. Prevents churn. Default: 300s (5 minutes)
+ENTRY_RETRY_COOLDOWN_SECONDS = int(os.getenv("ENTRY_RETRY_COOLDOWN_SECONDS", "300"))
+
 
 if not ALPACA_API_KEY_ID or not ALPACA_API_SECRET_KEY:
     raise RuntimeError("Alpaca API keys are missing. Check your .env file.")
@@ -128,9 +132,9 @@ ATR_TP_MULTIPLIER_DEFAULT = 2.0
 # How many ATRs below entry price for stop loss
 ATR_STOP_MULTIPLIER_DEFAULT = 1.0
 
-# ATR-based exit defaults
-ATR_MULTIPLIER_TP_DEFAULT = ATR_TP_MULTIPLIER_DEFAULT
-ATR_MULTIPLIER_SL_DEFAULT = ATR_STOP_MULTIPLIER_DEFAULT
+# ATR-based exit defaults (deprecated: use ATR_TP_MULTIPLIER_DEFAULT and ATR_STOP_MULTIPLIER_DEFAULT directly)
+# ATR_MULTIPLIER_TP_DEFAULT = ATR_TP_MULTIPLIER_DEFAULT  # DEPRECATED
+# ATR_MULTIPLIER_SL_DEFAULT = ATR_STOP_MULTIPLIER_DEFAULT  # DEPRECATED
 
 # --- ATR-based entry filters (for atr_sma_trend) ---
 # How many daily bars to use for ATR when evaluating entries

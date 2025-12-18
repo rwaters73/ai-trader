@@ -766,38 +766,32 @@ def cancel_all_open_orders() -> None:
             print(f"[WARN] Failed to cancel order {order.id}: {exception}")
 
 def cancel_stale_entry_orders_for_symbol(
-    state: SymbolState,
+    symbol: str,
     ttl_seconds: int = ENTRY_ORDER_TTL_SECONDS,
-) -> None:
+) -> int:
     """
-    Cancel stale LIMIT BUY entry orders if:
-      - We are currently FLAT in this symbol (position_qty == 0).
-      - There are open BUY entry orders.
-      - The order's submitted_at timestamp is older than `ttl_seconds`.
+    Cancel stale LIMIT BUY entry orders for a symbol.
 
-    This prevents us from chasing an entry after price moves away. Exit orders
-    (SELL TP/SL) are not affected.
+    Behavior:
+      - Fetches all open orders for the symbol.
+      - Filters to BUY orders only (ignores SELL exit orders).
+      - Cancels BUY orders with submitted_at or created_at older than `ttl_seconds`.
+      - Logs each cancel event to DB.
+      - Returns the count of orders canceled.
+
+    This prevents stale entries after price has moved away significantly.
     """
-    symbol = state.symbol
-
-    # Only check for stale ENTRY orders if we are flat and there are open orders
-    if abs(state.position_qty) > 1e-6:
-        return
-
-    if not state.has_open_orders:
-        # Fast path: nothing to do when we know there are no open orders
-        return
-
     try:
         open_orders = get_open_orders_for_symbol(symbol)
     except Exception as exc:
         print(f"[WARN] {symbol}: Could not fetch open orders for stale-check: {exc}")
-        return
+        return 0
 
     if not open_orders:
-        return
+        return 0
 
     now_utc = datetime.now(timezone.utc)
+    canceled_count = 0
 
     for order in open_orders:
         try:
@@ -821,12 +815,14 @@ def cancel_stale_entry_orders_for_symbol(
 
             if age_seconds > ttl_seconds:
                 print(
-                    f"{symbol}: Cancelling ENTRY order {order.id} (BUY) due to TTL exceeded: age={age_seconds:.1f}s > {ttl_seconds}s."
+                    f"{symbol}: Cancelling stale ENTRY order {order.id} (BUY, age={age_seconds:.1f}s > TTL={ttl_seconds}s)."
                 )
                 try:
                     _trading_client.cancel_order_by_id(order.id)
+                    canceled_count += 1
                 except Exception as cancel_exc:
                     print(f"[WARN] Failed to cancel order {order.id}: {cancel_exc}")
+                    continue
 
                 # Log cancel to DB
                 try:
@@ -842,6 +838,8 @@ def cancel_stale_entry_orders_for_symbol(
 
         except Exception as e:
             print(f"[WARN] {symbol}: Error while checking stale entry order {getattr(order, 'id', 'unknown')}: {e}")
+
+    return canceled_count
 
 
 def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) -> None:

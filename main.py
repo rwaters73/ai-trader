@@ -13,8 +13,10 @@ from broker import (
     ensure_exit_orders_for_symbol,
     cancel_all_open_orders,
     flatten_all,
+    cancel_stale_entry_orders_for_symbol,
 )
 from strategy import decide_target_position
+from config import ENTRY_RETRY_COOLDOWN_SECONDS
 
 # Circuit breakers (safe if you added them, optional if you did not)
 try:
@@ -161,6 +163,10 @@ def main(symbols_to_trade: List[str],
     print("Trading-hours filter: 8:30–15:00 Central, Mon–Fri.")
     print()
 
+    # Track per-symbol cooldown after stale entry cancellation
+    # Maps symbol -> timestamp when cooldown expires
+    entry_retry_cooldown: dict[str, float] = {}
+
     for i in range(iterations):
         loop_dt = _now_central()
         iso_ts = loop_dt.isoformat(timespec="seconds")
@@ -219,11 +225,43 @@ def main(symbols_to_trade: List[str],
                 print(f"[WARN] Failed to build state for {symbol}: {e}")
                 continue
 
+            # Check and cancel stale entry orders (BUY only, not exits)
+            try:
+                canceled = cancel_stale_entry_orders_for_symbol(symbol)
+                if canceled > 0:
+                    # Set cooldown: do not try to enter this symbol until cooldown expires
+                    now_ts = time.time()
+                    cooldown_until = now_ts + ENTRY_RETRY_COOLDOWN_SECONDS
+                    entry_retry_cooldown[symbol] = cooldown_until
+                    print(f"[cooldown] {symbol}: stale entry order(s) canceled; entry blocked for {ENTRY_RETRY_COOLDOWN_SECONDS}s.")
+            except Exception as e:
+                print(f"[WARN] cancel_stale_entry_orders failed for {symbol}: {e}")
+
             try:
                 target = decide_target_position(state)
             except Exception as e:
                 print(f"[WARN] Strategy error for {symbol}: {e}")
                 continue
+
+            # Check if we are in cooldown and block new entries
+            now_ts = time.time()
+            if symbol in entry_retry_cooldown and now_ts < entry_retry_cooldown[symbol]:
+                if target.target_qty > 0 and state.position_qty == 0:
+                    # Block new entry while in cooldown
+                    from models import TargetPosition
+                    remaining_cooldown = entry_retry_cooldown[symbol] - now_ts
+                    target = TargetPosition(
+                        symbol=symbol,
+                        target_qty=0.0,
+                        reason=f"Entry retry cooldown active ({remaining_cooldown:.1f}s remaining)",
+                        entry_type="market",
+                        entry_limit_price=None,
+                        take_profit_price=None,
+                        stop_loss_price=None,
+                    )
+            else:
+                # Cooldown expired; clean up
+                entry_retry_cooldown.pop(symbol, None)
 
             try:
                 reconcile_position(state, target, extended=in_ext)

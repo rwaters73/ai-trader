@@ -38,15 +38,6 @@ MAX_DAILY_LOSS_PERCENT = 5.0
 # before we cancel it and stop chasing that entry.
 MAX_ENTRY_ORDER_AGE_MINUTES = 15
 
-# Time-to-live for ENTRY orders in seconds. If an entry BUY order is older
-# than this TTL it will be canceled to avoid stale entries. Default: 120s
-ENTRY_ORDER_TTL_SECONDS = int(os.getenv("ENTRY_ORDER_TTL_SECONDS", "120"))
-
-# Cooldown period (in seconds) after canceling a stale entry order before
-# we attempt to enter the same symbol again. Prevents churn. Default: 300s (5 minutes)
-ENTRY_RETRY_COOLDOWN_SECONDS = int(os.getenv("ENTRY_RETRY_COOLDOWN_SECONDS", "300"))
-
-
 if not ALPACA_API_KEY_ID or not ALPACA_API_SECRET_KEY:
     raise RuntimeError("Alpaca API keys are missing. Check your .env file.")
 
@@ -118,13 +109,21 @@ BRACKET_SL_PCT_BY_SYMBOL = {
 #LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() in ("1", "true", "yes")
 LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# Time-to-live for ENTRY orders in seconds. If an entry BUY order is older
+# than this TTL it will be canceled to avoid stale entries. Default: 120s
+#ENTRY_ORDER_TTL_SECONDS = int(os.getenv("ENTRY_ORDER_TTL_SECONDS", "120"))
+#ENTRY_ORDER_TTL_SECONDS = 120              # cancel/replace after 2 minutes
+
+# Cooldown period (in seconds) after canceling a stale entry order before
+# we attempt to enter the same symbol again. Prevents churn. Default: 300s (5 minutes)
+#ENTRY_RETRY_COOLDOWN_SECONDS = int(os.getenv("ENTRY_RETRY_COOLDOWN_SECONDS", "300"))
 
 # Entry order management
-ENTRY_ORDER_TTL_SECONDS = 120              # cancel/replace after 2 minutes
-ENTRY_MAX_REPLACES = 3                     # max number of replace attempts per entry signal
-ENTRY_REPLACE_CHASE_PCT = 0.50             # how far we allow limit to "chase" per replace (percent)
-ENTRY_RETRY_COOLDOWN_SECONDS = 300         # after max replaces, stop trying for 5 minutes
-ENTRY_REPLACE_PRICE_SOURCE = "ask"         # "ask" preferred, fallback to bid
+ENTRY_ORDER_TTL_SECONDS = int(os.getenv("ENTRY_ORDER_TTL_SECONDS", "120"))
+ENTRY_MAX_REPLACES = int(os.getenv("ENTRY_MAX_REPLACES", "3"))                     # max number of replace attempts per entry signal
+ENTRY_REPLACE_CHASE_PCT = float(os.getenv("ENTRY_REPLACE_CHASE_PCT", "0.50"))            # how far we allow limit to "chase" per replace (percent)
+ENTRY_RETRY_COOLDOWN_SECONDS = int(os.getenv("ENTRY_RETRY_COOLDOWN_SECONDS", "300"))         # after max replaces, stop trying for 5 minutes
+ENTRY_REPLACE_PRICE_SOURCE = os.getenv("ENTRY_REPLACE_PRICE_SOURCE", "ask").lower()         # "ask" or "bid"
 
 # ==========================================================
 # ATR based stop loss and take profit configuration

@@ -1,7 +1,7 @@
 import pandas as pd
 import math
 
-from typing import Optional
+from typing import Optional, Tuple
 from datetime import datetime, timezone
 
 import requests
@@ -13,7 +13,7 @@ from alpaca.trading.requests import (
     GetOrdersRequest,
     # BracketOrderRequest,
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus, OrderType
 
 from daily_risk import (
     can_open_new_trade, 
@@ -765,82 +765,136 @@ def cancel_all_open_orders() -> None:
         except Exception as exception:
             print(f"[WARN] Failed to cancel order {order.id}: {exception}")
 
+def _parse_order_time(order) -> Optional[datetime]:
+    """
+    Alpaca order timestamps may be datetime or ISO strings depending on SDK/version.
+    Prefer submitted_at, else created_at.
+    """
+    ts = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    # string fallback
+    try:
+        # alpaca tends to use ISO-8601
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _safe_float(x) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
 def cancel_stale_entry_orders_for_symbol(
     symbol: str,
-    ttl_seconds: int = ENTRY_ORDER_TTL_SECONDS,
-) -> int:
+    ttl_seconds: int,
+    replace: bool,
+    replacement_qty: Optional[float],
+    replacement_limit_price: Optional[float],
+    extended: bool,
+) -> Tuple[bool, str]:
     """
-    Cancel stale LIMIT BUY entry orders for a symbol.
+    TTL cancel + (optional) replace for ENTRY orders.
 
-    Behavior:
-      - Fetches all open orders for the symbol.
-      - Filters to BUY orders only (ignores SELL exit orders).
-      - Cancels BUY orders with submitted_at or created_at older than `ttl_seconds`.
-      - Logs each cancel event to DB.
-      - Returns the count of orders canceled.
+    We define "entry order" as:
+      - side == BUY
+      - type == LIMIT
+      - status == OPEN
 
-    This prevents stale entries after price has moved away significantly.
+    Returns:
+      (did_action, reason)
     """
-    try:
-        open_orders = get_open_orders_for_symbol(symbol)
-    except Exception as exc:
-        print(f"[WARN] {symbol}: Could not fetch open orders for stale-check: {exc}")
-        return 0
+    # Fetch open orders for symbol
+    request_params = GetOrdersRequest(
+        status=QueryOrderStatus.OPEN,
+        symbols=[symbol],
+        nested=False,
+        limit=50,
+    )
+    open_orders = _trading_client.get_orders(filter=request_params)
 
     if not open_orders:
-        return 0
+        return False, "No open orders."
 
-    now_utc = datetime.now(timezone.utc)
-    canceled_count = 0
+    now = datetime.now(timezone.utc)
 
-    for order in open_orders:
+    # Find open BUY LIMIT orders (entry candidates)
+    entry_orders = []
+    for o in open_orders:
+        side = getattr(o, "side", None)
+        otype = getattr(o, "order_type", None) or getattr(o, "type", None)
+
+        if side == OrderSide.BUY and otype in (OrderType.LIMIT, "limit"):
+            entry_orders.append(o)
+
+    if not entry_orders:
+        return False, "No open BUY LIMIT orders."
+
+    # Evaluate staleness
+    stale_orders = []
+    for o in entry_orders:
+        ts = _parse_order_time(o)
+        if ts is None:
+            continue
+        age_seconds = (now - ts).total_seconds()
+        if age_seconds >= float(ttl_seconds):
+            stale_orders.append((o, age_seconds))
+
+    if not stale_orders:
+        return False, "No stale entry orders."
+
+    # Cancel all stale entry orders (usually you will have 1)
+    for o, age_seconds in stale_orders:
+        oid = getattr(o, "id", None)
         try:
-            # Ignore non BUY orders here (we do not want to cancel TP/SL SELLs)
-            side_str = str(order.side).lower()
-            if not side_str.endswith("buy"):
-                continue
-
-            # Prefer submitted_at (when the order was actually sent); fallback to created_at
-            submitted_at = getattr(order, "submitted_at", None) or getattr(order, "created_at", None)
-            if submitted_at is None:
-                # No reliable timestamp; skip this order
-                print(f"[WARN] {symbol}: Open BUY order {order.id} has no submitted_at/created_at; skipping TTL check.")
-                continue
-
-            # Ensure timezone-aware
-            if submitted_at.tzinfo is None:
-                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
-
-            age_seconds = (now_utc - submitted_at).total_seconds()
-
-            if age_seconds > ttl_seconds:
-                print(
-                    f"{symbol}: Cancelling stale ENTRY order {order.id} (BUY, age={age_seconds:.1f}s > TTL={ttl_seconds}s)."
-                )
-                try:
-                    _trading_client.cancel_order_by_id(order.id)
-                    canceled_count += 1
-                except Exception as cancel_exc:
-                    print(f"[WARN] Failed to cancel order {order.id}: {cancel_exc}")
-                    continue
-
-                # Log cancel to DB
-                try:
-                    log_order_event_to_db(
-                        alpaca_order_id=str(order.id),
-                        event_type="canceled_stale_entry",
-                        filled_qty=float(getattr(order, "filled_qty", 0) or 0),
-                        remaining_qty=float(getattr(order, "qty", 0)) - float(getattr(order, "filled_qty", 0) or 0),
-                        status="canceled",
-                    )
-                except Exception as log_exc:
-                    print(f"[WARN] Failed to log stale-cancel event for order {order.id}: {log_exc}")
-
+            _trading_client.cancel_order_by_id(oid)
+            print(
+                f"[TTL] Cancelled stale ENTRY order for {symbol}: "
+                f"id={oid}, age={age_seconds:.0f}s"
+            )
         except Exception as e:
-            print(f"[WARN] {symbol}: Error while checking stale entry order {getattr(order, 'id', 'unknown')}: {e}")
+            return True, f"Attempted cancel but failed: {e}"
 
-    return canceled_count
+    # Optional replace
+    if not replace:
+        return True, "Cancelled stale entry order(s); replace disabled."
 
+    if replacement_qty is None or replacement_qty <= 0:
+        return True, "Cancelled stale entry order(s); not replacing because qty invalid."
+
+    if replacement_limit_price is None or replacement_limit_price <= 0:
+        return True, "Cancelled stale entry order(s); not replacing because limit_price invalid."
+
+    # Whole-share safety (non-fractionable assets)
+    replacement_qty_int = int(replacement_qty)
+    if replacement_qty_int <= 0:
+        return True, "Cancelled stale entry order(s); not replacing because qty floors to 0."
+
+    # Round price to 2 decimals to avoid sub-penny rejection
+    replacement_limit_price_rounded = round(float(replacement_limit_price), 2)
+
+    order = submit_limit_order(
+        symbol=symbol,
+        quantity=replacement_qty_int,
+        limit_price=replacement_limit_price_rounded,
+        side="buy",
+        extended=extended,
+    )
+
+    if order is None:
+        return True, "Cancelled stale entry order(s); replacement submit returned None."
+
+    return True, (
+        f"Cancelled stale entry order(s) and replaced with BUY LIMIT "
+        f"qty={replacement_qty_int} @ {replacement_limit_price_rounded}."
+    )
 
 def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) -> None:
     """

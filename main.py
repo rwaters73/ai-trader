@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
-from typing import List, Optional
-from dataclasses import dataclass
+from typing import List
 
 import pytz
 
@@ -15,7 +14,7 @@ from broker import (
     cancel_all_open_orders,
     flatten_all,
     cancel_stale_entry_orders_for_symbol,
-    replace_stale_entry_buy_limit_if_needed, 
+    replace_stale_entry_buy_limit_if_needed,
     EntryReplaceState,
 )
 
@@ -24,12 +23,13 @@ from config import (
     ENTRY_ORDER_TTL_SECONDS,
     ENTRY_MAX_REPLACES,
     ENTRY_REPLACE_CHASE_PCT,
-    ENTRY_RETRY_COOLDOWN_SECONDS, 
+    ENTRY_RETRY_COOLDOWN_SECONDS,
 )
 
+# Per-symbol replace state for TTL cancel + replace
 _entry_replace_state: dict[str, EntryReplaceState] = {}
 
-# Circuit breakers (safe if you added them, optional if you did not)
+# Circuit breakers (optional)
 try:
     from circuit_breakers import has_hit_daily_loss_limit
 except Exception:
@@ -61,10 +61,10 @@ def _looks_like_valid_symbol(token: str) -> bool:
     """
     Conservative validation for symbols.
 
-    We want to accept typical US tickers:
-      - Letters, numbers, dot (BRK.B), dash (if it ever appears)
-    We explicitly reject anything that looks like a dataclass repr or has
-    punctuation that indicates a whole object got written to the file.
+    Accept typical US tickers:
+      - Letters, numbers, dot (BRK.B), dash
+
+    Reject anything that looks like a dataclass repr or object dump.
     """
     if not token:
         return False
@@ -73,10 +73,8 @@ def _looks_like_valid_symbol(token: str) -> bool:
     if "(" in token or ")" in token or "," in token:
         return False
 
-    # Very conservative allowed characters
     allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")
     upper = token.upper()
-
     return all(ch in allowed for ch in upper)
 
 
@@ -103,15 +101,9 @@ def load_symbols_from_watchlist(path: Path = WATCHLIST_PATH) -> List[str]:
     skipped = 0
     for line in raw_lines:
         stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
+        if not stripped or stripped.startswith("#"):
             continue
 
-
-        # -----------------------------
-        # Internal helpers (no behavior changes)
-        # -----------------------------
         token = stripped.split()[0].strip()
         if not _looks_like_valid_symbol(token):
             skipped += 1
@@ -159,22 +151,16 @@ def is_in_eod_window(dt: datetime) -> bool:
     return window_start <= dt <= end_dt
 
 
-# We avoid importing timedelta up top unless we need it
-from datetime import timedelta  # noqa: E402  (kept here to avoid clutter above)
-
-
 # -----------------------------
-# Internal helpers (no behavior changes)
+# Circuit breaker helpers
 # -----------------------------
 def _capture_session_start_equity() -> float:
-    """Capture equity at session start for circuit-breaker checks.
-
-    Best-effort; returns 0.0 if unavailable.
-    """
+    """Best-effort; returns 0.0 if unavailable."""
     equity = 0.0
     if has_hit_daily_loss_limit is not None:
         try:
             from circuit_breakers import get_current_equity
+
             equity = get_current_equity()
             print(f"Session start equity: ${equity:.2f}")
         except Exception as e:
@@ -183,10 +169,7 @@ def _capture_session_start_equity() -> float:
 
 
 def _apply_circuit_breaker(session_start_equity: float, symbols_to_trade: List[str]) -> bool:
-    """Run daily loss circuit breaker; returns True if we should stop.
-
-    Side-effects (unchanged): cancels all open orders and flattens positions.
-    """
+    """Returns True if we should stop."""
     if has_hit_daily_loss_limit is None:
         return False
 
@@ -216,7 +199,6 @@ def _apply_eod_policies(symbols_to_trade: List[str]) -> bool:
     except Exception as e:
         print(f"[WARN] Failed to cancel open orders: {e}")
 
-    # Default policy: flatten everything into the close
     print("EOD: Flattening all symbols...")
     try:
         flatten_all(symbols_to_trade)
@@ -226,21 +208,28 @@ def _apply_eod_policies(symbols_to_trade: List[str]) -> bool:
     return True
 
 
-def _process_symbol(
-    symbol: str,
-    in_ext: bool,
-    entry_retry_cooldown: dict[str, float],
-) -> None:
-    """Single-symbol decision cycle. Preserves existing behavior."""
+# -----------------------------
+# TTL cancel + replace helpers
+# -----------------------------
+def _set_entry_cooldown(symbol: str, seconds: float) -> None:
+    """Sets a per-symbol cooldown for new entries after stale order cancellation."""
+    st = _entry_replace_state.get(symbol, EntryReplaceState())
+    st.cooldown_until_epoch = time.time() + float(seconds)
+    _entry_replace_state[symbol] = st
+
+
+def _process_symbol(symbol: str, in_ext: bool) -> None:
+    """Single-symbol decision cycle."""
     try:
         state = build_symbol_state(symbol)
     except Exception as e:
         print(f"[WARN] Failed to build state for {symbol}: {e}")
         return
 
+    # Per-symbol cooldown after stale entry cancellation or too many replaces
     st = _entry_replace_state.get(symbol)
     now_epoch = time.time()
-    if st and now_epoch < st.cooldown_until_epoch:
+    if st and now_epoch < getattr(st, "cooldown_until_epoch", 0):
         remaining = int(st.cooldown_until_epoch - now_epoch)
         print(f"[ENTRY] {symbol}: cooldown active ({remaining}s). Skipping.")
         return
@@ -251,54 +240,93 @@ def _process_symbol(
         print(f"[WARN] Strategy error for {symbol}: {e}")
         return
 
-    # TTL cancel + replace for stale entry BUY LIMITs (extended-hours allowed)
+    # Determine if this cycle is trying to place an ENTRY limit buy
     is_flat = abs(state.position_qty) < 1e-6
-    wants_entry = (
+    wants_entry_limit_buy = (
         is_flat
         and target.target_qty > 0
         and (target.entry_type or "").lower() == "limit"
         and target.entry_limit_price is not None
     )
 
-    if wants_entry and state.has_open_orders:
-        st = _entry_replace_state.get(symbol, EntryReplaceState())
+    # TTL cancel + replace is only relevant when:
+    #  - we want to enter (flat -> long)
+    #  - there are open orders (assumed to include that entry order)
+    if wants_entry_limit_buy and state.has_open_orders:
+        # 1) If the existing entry is stale, broker cancels it.
+        #    If it cancels, we go into cooldown to avoid immediate re-submission.
+        try:
+            canceled = cancel_stale_entry_orders_for_symbol(
+                symbol=symbol,
+                ttl_seconds=ENTRY_ORDER_TTL_SECONDS,
+            )
+        except TypeError:
+            # In case broker signature differs slightly, fall back to positional call
+            try:
+                canceled = cancel_stale_entry_orders_for_symbol(symbol, ENTRY_ORDER_TTL_SECONDS)
+            except Exception as e:
+                print(f"[WARN] cancel_stale_entry_orders_for_symbol failed for {symbol}: {e}")
+                canceled = False
+        except Exception as e:
+            print(f"[WARN] cancel_stale_entry_orders_for_symbol failed for {symbol}: {e}")
+            canceled = False
 
-        did_replace, st = replace_stale_entry_buy_limit_if_needed(
-            symbol=symbol,
-            desired_qty=target.target_qty,  # since state is flat, delta == target
-            desired_limit_price=target.entry_limit_price,
-            state=st,
-            ttl_seconds=ENTRY_ORDER_TTL_SECONDS,
-            max_replaces=ENTRY_MAX_REPLACES,
-            chase_pct=ENTRY_REPLACE_CHASE_PCT,
-            extended=in_ext,
-        )
-        _entry_replace_state[symbol] = st
+        if canceled:
+            print(
+                f"[ENTRY] {symbol}: canceled stale entry order(s). "
+                f"Cooldown {ENTRY_RETRY_COOLDOWN_SECONDS}s."
+            )
+            _set_entry_cooldown(symbol, ENTRY_RETRY_COOLDOWN_SECONDS)
+            return  # skip reconcile this iteration
+
+        # 2) If not canceled, we may still want to replace (chase) if conditions met.
+        st = _entry_replace_state.get(symbol, EntryReplaceState())
+        try:
+            did_replace, st = replace_stale_entry_buy_limit_if_needed(
+                symbol=symbol,
+                desired_qty=target.target_qty,  # state is flat so delta equals target
+                desired_limit_price=target.entry_limit_price,
+                state=st,
+                ttl_seconds=ENTRY_ORDER_TTL_SECONDS,
+                max_replaces=ENTRY_MAX_REPLACES,
+                chase_pct=ENTRY_REPLACE_CHASE_PCT,
+                extended=in_ext,
+            )
+            _entry_replace_state[symbol] = st
+        except Exception as e:
+            print(f"[WARN] replace_stale_entry_buy_limit_if_needed failed for {symbol}: {e}")
+            did_replace = False
 
         if did_replace:
-            # Important: skip reconcile this iteration so we do not double-submit
+            # Important: skip reconcile this iteration to prevent double-submit
             return
 
-    # Check if we are in cooldown and block new entries
-    now_ts = time.time()
-    if symbol in entry_retry_cooldown and now_ts < entry_retry_cooldown[symbol]:
-        if target.target_qty > 0 and state.position_qty == 0:
-            # Block new entry while in cooldown
-            from models import TargetPosition
-            remaining_cooldown = entry_retry_cooldown[symbol] - now_ts
-            target = TargetPosition(
-                symbol=symbol,
-                target_qty=0.0,
-                reason=f"Entry retry cooldown active ({remaining_cooldown:.1f}s remaining)",
-                entry_type="market",
-                entry_limit_price=None,
-                take_profit_price=None,
-                stop_loss_price=None,
-            )
-    else:
-        # Cooldown expired; clean up
-        entry_retry_cooldown.pop(symbol, None)
+        # 3) Safety: if we have exhausted replaces, cancel and cool down.
+        #    We do not assume exact field name, but we try common ones.
+        replace_count = getattr(st, "replace_count", None)
+        if replace_count is None:
+            replace_count = getattr(st, "num_replaces", 0)
 
+        if int(replace_count or 0) >= int(ENTRY_MAX_REPLACES):
+            print(
+                f"[ENTRY] {symbol}: max replaces reached ({replace_count}). "
+                f"Cancelling stale entry and cooling down."
+            )
+            try:
+                cancel_all_open_orders_for_symbol = getattr(
+                    __import__("broker"), "cancel_all_open_orders_for_symbol", None
+                )
+                if callable(cancel_all_open_orders_for_symbol):
+                    cancel_all_open_orders_for_symbol(symbol)
+                else:
+                    cancel_all_open_orders()  # fallback
+            except Exception as e:
+                print(f"[WARN] Failed to cancel orders after max replaces for {symbol}: {e}")
+
+            _set_entry_cooldown(symbol, ENTRY_RETRY_COOLDOWN_SECONDS)
+            return
+
+    # Normal reconciliation path
     try:
         reconcile_position(state, target, extended=in_ext)
     except Exception as e:
@@ -311,12 +339,16 @@ def _process_symbol(
     except Exception as e:
         print(f"[WARN] ensure_exit_orders_for_symbol failed for {symbol}: {e}")
         return
+
+
 # -----------------------------
 # Main loop
 # -----------------------------
-def main(symbols_to_trade: List[str],
-         iterations: int = ITERATIONS_DEFAULT,
-         interval_seconds: float = INTERVAL_SECONDS_DEFAULT) -> None:
+def main(
+    symbols_to_trade: List[str],
+    iterations: int = ITERATIONS_DEFAULT,
+    interval_seconds: float = INTERVAL_SECONDS_DEFAULT,
+) -> None:
     if not symbols_to_trade:
         print("[WARN] No symbols provided. Exiting.")
         return
@@ -326,12 +358,7 @@ def main(symbols_to_trade: List[str],
     print("Trading-hours filter: 8:30–15:00 Central, Mon–Fri.")
     print()
 
-    # Capture session start equity for circuit breaker checks
     session_start_equity = _capture_session_start_equity()
-
-    # Track per-symbol cooldown after stale entry cancellation
-    # Maps symbol -> timestamp when cooldown expires
-    entry_retry_cooldown: dict[str, float] = {}
 
     try:
         for i in range(iterations):
@@ -341,7 +368,7 @@ def main(symbols_to_trade: List[str],
             print(f"\n--- Iteration {i + 1}/{iterations} at {iso_ts} ---")
 
             in_rth = is_in_rth(loop_dt)
-            in_ext = not in_rth  # your broker functions already accept extended flag
+            in_ext = not in_rth  # extended-hours allowed when not in RTH
 
             if in_rth:
                 print("Within RTH session. Running decision cycles for all symbols...")
@@ -352,14 +379,13 @@ def main(symbols_to_trade: List[str],
             if _apply_circuit_breaker(session_start_equity, symbols_to_trade):
                 break
 
-            # EOD policies
+            # EOD policies (still only during RTH EOD window)
             if is_in_eod_window(loop_dt):
                 if _apply_eod_policies(symbols_to_trade):
                     break
 
-            # Per-symbol decision cycle
             for symbol in symbols_to_trade:
-                _process_symbol(symbol=symbol, in_ext=in_ext, entry_retry_cooldown=entry_retry_cooldown)
+                _process_symbol(symbol=symbol, in_ext=in_ext)
 
             time.sleep(interval_seconds)
 

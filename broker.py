@@ -50,6 +50,9 @@ from config import (
     ENTRY_ORDER_TTL_SECONDS,
 )
 
+# Maximum spread percentage allowed during extended hours before skipping entry
+MAX_SPREAD_PCT_EXTENDED = 2.0  # 2% max spread during extended hours
+
 from risk_limits import (
     build_risk_context, 
     can_open_new_position,
@@ -63,6 +66,57 @@ _trading_client = TradingClient(
     ALPACA_API_SECRET_KEY,
     paper=True,
 )
+
+# ---------------------------------------------------------------------------
+# Entry order lifecycle tracking (in-memory, per symbol per trading day)
+# ---------------------------------------------------------------------------
+_entry_order_tracking: dict[str, dict] = {}
+# Structure: {symbol: {"date": "YYYY-MM-DD", "submitted": True, "filled": False}}
+
+def _get_trading_date() -> str:
+    """Return current trading date as YYYY-MM-DD string (UTC-based for simplicity)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+def can_submit_entry_for_symbol(symbol: str) -> tuple[bool, str]:
+    """Check if we can submit a new entry order for this symbol today.
+    
+    Returns (allowed, reason).
+    Rules:
+      - If no entry submitted today: allowed.
+      - If entry submitted but not filled: blocked (one-entry-per-day guard).
+      - If entry submitted and filled: allowed (prior entry completed).
+    """
+    today = _get_trading_date()
+    if symbol not in _entry_order_tracking:
+        return True, "No prior entry today"
+    
+    record = _entry_order_tracking[symbol]
+    if record.get("date") != today:
+        # Stale record from previous day; reset
+        _entry_order_tracking[symbol] = {"date": today, "submitted": False, "filled": False}
+        return True, "Prior entry from different day; reset"
+    
+    if record.get("submitted") and not record.get("filled"):
+        return False, "Entry order already submitted today and not yet filled (one-entry-per-day guard)"
+    
+    if record.get("filled"):
+        # Prior entry filled; allow another entry
+        return True, "Prior entry filled; allowing new entry"
+    
+    return True, "No blocking condition"
+
+def record_entry_submission(symbol: str) -> None:
+    """Record that we submitted an entry order for this symbol today."""
+    today = _get_trading_date()
+    _entry_order_tracking[symbol] = {"date": today, "submitted": True, "filled": False}
+    print(f"[ENTRY_GUARD] {symbol}: recorded entry submission for {today}")
+
+def record_entry_fill(symbol: str) -> None:
+    """Record that an entry order for this symbol filled (allows new entries)."""
+    today = _get_trading_date()
+    if symbol in _entry_order_tracking and _entry_order_tracking[symbol].get("date") == today:
+        _entry_order_tracking[symbol]["filled"] = True
+        print(f"[ENTRY_GUARD] {symbol}: recorded entry fill for {today}")
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +535,42 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
     is_entry_from_flat = (abs(current) < 1e-6) and (desired > 0)
 
     # --------------------------------------------------
+    # Entry order lifecycle management (before risk checks)
+    # --------------------------------------------------
+    if is_entry_from_flat:
+        # 1) Quote validation: ensure bid/ask are valid
+        if state.ask is None or state.ask <= 0:
+            print(f"{state.symbol}: [ENTRY_GUARD] Invalid ask price ({state.ask}); skipping entry.")
+            return
+        
+        # 2) Spread check during extended hours
+        if extended and state.bid and state.bid > 0:
+            spread_pct = 100.0 * (state.ask - state.bid) / state.bid
+            if spread_pct > MAX_SPREAD_PCT_EXTENDED:
+                print(
+                    f"{state.symbol}: [ENTRY_GUARD] Spread too wide during extended hours: "
+                    f"{spread_pct:.2f}% > {MAX_SPREAD_PCT_EXTENDED}%; skipping entry."
+                )
+                return
+        
+        # 3) Cancel any stale entry orders (TTL enforcement)
+        try:
+            canceled_count = cancel_stale_entry_buy_limits_for_symbol(
+                symbol=state.symbol,
+                ttl_seconds=ENTRY_ORDER_TTL_SECONDS,
+            )
+            if canceled_count > 0:
+                print(f"{state.symbol}: [ENTRY_GUARD] Canceled {canceled_count} stale entry order(s).")
+        except Exception as e:
+            print(f"{state.symbol}: [ENTRY_GUARD] TTL cancel failed: {e}")
+        
+        # 4) One-entry-per-day guard: block if prior entry not filled
+        allowed, reason = can_submit_entry_for_symbol(state.symbol)
+        if not allowed:
+            print(f"{state.symbol}: [ENTRY_GUARD] {reason}; skipping entry.")
+            return
+
+    # --------------------------------------------------
     # Daily risk circuit breaker for new entries (global and per-symbol)
     # --------------------------------------------------
     if is_entry_from_flat:
@@ -563,6 +653,9 @@ def reconcile_position(state: SymbolState, target: TargetPosition, extended: boo
         except Exception:
             # ignore if per-symbol recorder not present
             pass
+
+        # Record entry submission for one-entry-per-day guard
+        record_entry_submission(state.symbol)
 
         print(f"{state.symbol}: Registered new trade for daily risk tracking.")
 
@@ -898,85 +991,155 @@ def cancel_stale_entry_orders_for_symbol(
 
 def ensure_exit_orders_for_symbol(state: SymbolState, extended: bool = False) -> None:
     """
-    If we hold a long position in this symbol and there are no SELL exit orders
-    already open, create an ATR-based stop-loss (and log the intended TP).
+    If we hold a long position in this symbol, ensure we have:
+      - A partial take-profit LIMIT sell for 33% of shares
+      - A stop-loss STOP sell for the remaining shares
 
-    Behavior:
-      - Only handles LONG positions (position_qty > 0).
-      - Uses ATR to compute SL and TP:
-            SL  = avg_entry_price - ATR_STOP_MULTIPLIER_DEFAULT * ATR
-            TP  = avg_entry_price + ATR_TP_MULTIPLIER_DEFAULT * ATR
-      - If ATR cannot be computed for any reason, falls back to
-        percentage-based exits from BRACKET_TP_PERCENT_BY_SYMBOL and
-        BRACKET_SL_PERCENT_BY_SYMBOL.
-      - Only a single SELL stop-loss order is submitted via submit_stop_loss_order.
+    This is a safe non-OCO approximation that avoids "insufficient qty available"
+    by splitting the position quantity across the two exit orders.
+
+    Notes:
+      - No fractional shares: quantities are coerced to whole shares.
+      - ATR is preferred intraday, with a fallback to daily ATR.
+      - TP/SL prices are computed off last_price (bid preferred, else ask).
     """
     symbol = state.symbol
-    position_quantity = state.position_qty
-    average_entry_price = state.avg_entry_price
+    position_qty_raw = state.position_qty
+    avg_entry = state.avg_entry_price
 
     # Only manage exits for LONG positions
-    if position_quantity <= 0 or average_entry_price is None:
+    if position_qty_raw <= 0 or avg_entry is None:
         return
 
-    # If there are already SELL orders open for this symbol, assume exits exist
-    open_orders = get_open_orders_for_symbol(symbol)
-    for open_order in open_orders:
-        try:
-            if str(open_order.side).lower().endswith("sell"):
-                # We already have at least one SELL order; assume TP/SL (or some exit) exists.
-                print(f"{symbol}: SELL exit order(s) already present; not creating new TP/SL.")
-                return
-        except Exception:
-            # If for some reason side is not readable, be safe and do nothing.
-            print(f"{symbol}: Could not inspect side on open order; skipping exit creation.")
-            return
+    # Whole shares only
+    position_qty = int(position_qty_raw)
+    if position_qty <= 0:
+        print(f"{symbol}: Position qty rounds to 0 shares; skipping exit order creation.")
+        return
 
     # Compute ATR: prefer intraday, fall back to daily
     atr_value = compute_intraday_atr_for_symbol(symbol)
     if atr_value is None:
         atr_value = compute_atr_for_symbol(symbol)
-    
+
     if atr_value is None:
-        print(f"[ATR] {symbol}: ATR (intraday and daily) not available; skipping exit order creation.")
+        print(f"[ATR] {symbol}: ATR (intraday and daily) not available; skipping exit creation.")
         return
 
     # Use bid or ask as the current price
     last_price = state.bid if state.bid and state.bid > 0 else state.ask
     if last_price is None or last_price <= 0:
-        print(f"[ATR] {symbol}: No valid bid/ask price; skipping exit order creation.")
+        print(f"[ATR] {symbol}: No valid bid/ask price; skipping exit creation.")
         return
 
-    # Compute stop-loss price only
-    stop_loss_price = last_price - atr_value * ATR_STOP_MULTIPLIER_DEFAULT
+    # Compute TP/SL prices from last_price
+    tp_price = last_price + (atr_value * ATR_TP_MULTIPLIER_DEFAULT)
+    sl_price = last_price - (atr_value * ATR_STOP_MULTIPLIER_DEFAULT)
+
+    if sl_price <= 0:
+        print(f"[ATR] {symbol}: Computed SL <= 0 (SL={sl_price:.4f}); skipping exit creation.")
+        return
+
+    # Normalize to cents (submit_* also rounds, but doing it here keeps logs clean)
+    tp_price = round(float(tp_price), 2)
+    sl_price = round(float(sl_price), 2)
+
+    # ------------------------------------------------------
+    # Split quantities to avoid "insufficient qty available"
+    # ------------------------------------------------------
+    # Partial TP: 33% of shares, at least 1 share if position >= 2
+    tp_qty = int(position_qty * 0.33)
+    if position_qty >= 2 and tp_qty < 1:
+        tp_qty = 1
+
+    # Remaining shares go to SL
+    sl_qty = position_qty - tp_qty
+
+    # If position is 1 share, prioritize stop-loss protection
+    if position_qty == 1:
+        tp_qty = 0
+        sl_qty = 1
+
+    if sl_qty <= 0:
+        # Safety: ensure SL always protects something
+        sl_qty = position_qty
+        tp_qty = 0
+
     print(
-        f"{symbol}: Using ATR-based stop-loss. Last price={last_price:.2f}, ATR={atr_value:.2f}, "
-        f"SL={stop_loss_price:.2f} (SL_mult={ATR_STOP_MULTIPLIER_DEFAULT})."
+        f"{symbol}: Using ATR exits. Last={last_price:.2f}, ATR={atr_value:.2f}, "
+        f"TP={tp_price:.2f} (TP_mult={ATR_TP_MULTIPLIER_DEFAULT}), "
+        f"SL={sl_price:.2f} (SL_mult={ATR_STOP_MULTIPLIER_DEFAULT}). "
+        f"Split qty: TP={tp_qty}, SL={sl_qty}, pos={position_qty}."
     )
 
-    # Submit only the STOP order
-    print(
-        f"{symbol}: Submitting SL STOP at {stop_loss_price:.2f} "
-        f"for quantity={position_quantity}."
-    )
+    # ------------------------------------------------------
+    # Inspect existing open SELL orders so we don't duplicate
+    # ------------------------------------------------------
+    open_orders = get_open_orders_for_symbol(symbol)
 
-    # Submit only the STOP order via the shared helper.
-    stop_loss_order = submit_stop_loss_order(
-        symbol=symbol,
-        quantity=position_quantity,
-        stop_price=stop_loss_price,
-        extended=extended,
-    )
+    def _is_sell(order_obj) -> bool:
+        try:
+            return str(getattr(order_obj, "side", "")).lower().endswith("sell")
+        except Exception:
+            return False
 
-    if stop_loss_order is not None:
-        print(f"{symbol}: SL STOP order submitted:")
-        print(stop_loss_order)
-    else:
-        # This will fire if StopOrderRequest is missing or validation failed.
-        print(
-            f"{symbol}: SL order not placed (see warnings above). "
-            f"Intended stop_price was {stop_loss_price:.2f}."
+    def _is_tp_limit(order_obj) -> bool:
+        try:
+            otype = str(getattr(order_obj, "order_type", "")).lower()
+            lim = getattr(order_obj, "limit_price", None)
+            return ("limit" in otype) and (lim is not None)
+        except Exception:
+            return False
+
+    def _is_sl_stop(order_obj) -> bool:
+        try:
+            otype = str(getattr(order_obj, "order_type", "")).lower()
+            stop = getattr(order_obj, "stop_price", None)
+            return ("stop" in otype) and (stop is not None)
+        except Exception:
+            return False
+
+    has_existing_tp = any(_is_sell(o) and _is_tp_limit(o) for o in open_orders)
+    has_existing_sl = any(_is_sell(o) and _is_sl_stop(o) for o in open_orders)
+
+    if has_existing_tp:
+        print(f"{symbol}: Existing TP LIMIT sell already present; not creating a new TP.")
+    if has_existing_sl:
+        print(f"{symbol}: Existing SL STOP sell already present; not creating a new SL.")
+
+    # ------------------------------------------------------
+    # Create missing exit orders
+    # ------------------------------------------------------
+    # TP LIMIT (partial)
+    if (not has_existing_tp) and tp_qty > 0:
+        print(f"{symbol}: Submitting TP LIMIT SELL qty={tp_qty} at {tp_price:.2f}.")
+        tp_order = submit_limit_order(
+            symbol=symbol,
+            quantity=tp_qty,
+            side=OrderSide.SELL,
+            limit_price=tp_price,
+            extended=extended,
         )
+        if tp_order is not None:
+            print(f"{symbol}: TP LIMIT order submitted:")
+            print(tp_order)
+        else:
+            print(f"{symbol}: TP LIMIT order not placed (see warnings above). Intended TP was {tp_price:.2f}.")
+
+    # SL STOP (remainder)
+    if (not has_existing_sl) and sl_qty > 0:
+        print(f"{symbol}: Submitting SL STOP SELL qty={sl_qty} at {sl_price:.2f}.")
+        sl_order = submit_stop_loss_order(
+            symbol=symbol,
+            quantity=sl_qty,
+            stop_price=sl_price,
+            extended=extended,
+        )
+        if sl_order is not None:
+            print(f"{symbol}: SL STOP order submitted:")
+            print(sl_order)
+        else:
+            print(f"{symbol}: SL STOP order not placed (see warnings above). Intended SL was {sl_price:.2f}.")
 
 
 def _order_timestamp_utc(order) -> Optional[datetime]:

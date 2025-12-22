@@ -1,0 +1,2 @@
+symbol,entry_date,exit_date,entry_price,exit_price,quantity,pnl_dollars,pnl_percent,holding_days
+MENS,2025-10-23 04:00:00+00:00,2025-10-24 04:00:00+00:00,60.74,60.647690545606,1646.0,-151.9413619325327,-0.15197473558446706,1

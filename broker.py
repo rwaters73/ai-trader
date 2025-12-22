@@ -212,6 +212,226 @@ def get_open_orders_for_symbol(symbol: str):
     )
     return _trading_client.get_orders(filter=request_params)
 
+from typing import Optional, Tuple
+
+def _safe_int_qty(q) -> int:
+    """
+    Alpaca often returns qty as a string. Coerce to int safely.
+    """
+    try:
+        if q is None:
+            return 0
+        return int(float(q))
+    except Exception:
+        return 0
+
+def _is_sell_order(order_obj) -> bool:
+    try:
+        return str(getattr(order_obj, "side", "")).lower().endswith("sell")
+    except Exception:
+        return False
+
+def _classify_exit_orders(open_orders) -> Tuple[Optional[object], Optional[object]]:
+    """
+    Return (tp_limit_order, sl_stop_order) from a list of open orders.
+    We classify by order_type + presence of limit_price/stop_price.
+    """
+    tp = None
+    sl = None
+
+    for o in open_orders:
+        if not _is_sell_order(o):
+            continue
+
+        try:
+            otype = str(getattr(o, "order_type", "")).lower()
+        except Exception:
+            otype = ""
+
+        limit_price = getattr(o, "limit_price", None)
+        stop_price = getattr(o, "stop_price", None)
+
+        # TP: a SELL limit order
+        if tp is None and ("limit" in otype) and (limit_price is not None):
+            tp = o
+            continue
+
+        # SL: a SELL stop order (stop market)
+        if sl is None and ("stop" in otype) and (stop_price is not None):
+            sl = o
+            continue
+
+    return tp, sl
+
+def _cancel_order_by_id(order_id: str) -> bool:
+    """
+    Cancel using alpaca-py TradingClient. Returns True if request was sent.
+    """
+    try:
+        _trading_client.cancel_order_by_id(order_id)
+        return True
+    except Exception as exc:
+        print(f"[WARN] Failed to cancel order {order_id}: {exc}")
+        return False
+
+def _recreate_tp_sl_orders_if_needed(
+    symbol: str,
+    desired_tp_qty: int,
+    desired_sl_qty: int,
+    tp_price: float,
+    sl_price: float,
+    extended: bool,
+) -> None:
+    """
+    Ensure TP and SL exist with the desired quantities.
+    If an order exists with the wrong qty, cancel and recreate.
+    """
+    open_orders = get_open_orders_for_symbol(symbol)
+    tp_order, sl_order = _classify_exit_orders(open_orders)
+
+    # --- TP order ---
+    if desired_tp_qty > 0:
+        if tp_order is None:
+            print(f"{symbol}: Watcher creating missing TP LIMIT qty={desired_tp_qty} at {tp_price:.2f}")
+            submit_limit_order(
+                symbol=symbol,
+                quantity=desired_tp_qty,
+                side=OrderSide.SELL,
+                limit_price=tp_price,
+                extended=extended,
+            )
+        else:
+            existing_tp_qty = _safe_int_qty(getattr(tp_order, "qty", None))
+            if existing_tp_qty != desired_tp_qty:
+                print(
+                    f"{symbol}: Watcher TP qty mismatch: existing={existing_tp_qty}, desired={desired_tp_qty}. "
+                    f"Cancelling/recreating TP."
+                )
+                _cancel_order_by_id(str(getattr(tp_order, "id", "")))
+                submit_limit_order(
+                    symbol=symbol,
+                    quantity=desired_tp_qty,
+                    side=OrderSide.SELL,
+                    limit_price=tp_price,
+                    extended=extended,
+                )
+    else:
+        # desired_tp_qty == 0, cancel any existing TP
+        if tp_order is not None:
+            print(f"{symbol}: Watcher cancelling TP because desired_tp_qty=0")
+            _cancel_order_by_id(str(getattr(tp_order, "id", "")))
+
+    # --- SL order ---
+    if desired_sl_qty > 0:
+        if sl_order is None:
+            print(f"{symbol}: Watcher creating missing SL STOP qty={desired_sl_qty} at {sl_price:.2f}")
+            submit_stop_loss_order(
+                symbol=symbol,
+                quantity=desired_sl_qty,
+                stop_price=sl_price,
+                extended=extended,
+            )
+        else:
+            existing_sl_qty = _safe_int_qty(getattr(sl_order, "qty", None))
+            if existing_sl_qty != desired_sl_qty:
+                print(
+                    f"{symbol}: Watcher SL qty mismatch: existing={existing_sl_qty}, desired={desired_sl_qty}. "
+                    f"Cancelling/recreating SL."
+                )
+                _cancel_order_by_id(str(getattr(sl_order, "id", "")))
+                submit_stop_loss_order(
+                    symbol=symbol,
+                    quantity=desired_sl_qty,
+                    stop_price=sl_price,
+                    extended=extended,
+                )
+    else:
+        # desired_sl_qty == 0, cancel any existing SL
+        if sl_order is not None:
+            print(f"{symbol}: Watcher cancelling SL because desired_sl_qty=0")
+            _cancel_order_by_id(str(getattr(sl_order, "id", "")))
+
+def watch_and_sync_exit_orders(state: SymbolState, extended: bool = False) -> None:
+    """
+    Lightweight order-event watcher (polling-based).
+
+    Each cycle, it:
+      - Reads current position quantity
+      - Computes intended TP/SL split (33% TP, remainder SL), whole shares only
+      - Computes ATR-based TP/SL prices (intraday preferred, fallback daily)
+      - Cancels/recreates TP/SL orders if missing or quantities are wrong
+      - Cancels all SELL exits if position is flat
+    """
+    symbol = state.symbol
+    pos_qty_raw = state.position_qty
+    avg_entry = state.avg_entry_price
+
+    # If flat, cancel any stray SELL exits
+    if pos_qty_raw <= 0 or avg_entry is None:
+        open_orders = get_open_orders_for_symbol(symbol)
+        for o in open_orders:
+            if _is_sell_order(o):
+                oid = str(getattr(o, "id", ""))
+                if oid:
+                    print(f"{symbol}: Watcher cancelling SELL exit because position is flat. order_id={oid}")
+                    _cancel_order_by_id(oid)
+        return
+
+    # Whole shares only
+    pos_qty = int(pos_qty_raw)
+    if pos_qty <= 0:
+        return
+
+    # ATR
+    atr_value = compute_intraday_atr_for_symbol(symbol)
+    if atr_value is None:
+        atr_value = compute_atr_for_symbol(symbol)
+    if atr_value is None:
+        print(f"[ATR] {symbol}: Watcher cannot compute ATR; skipping sync.")
+        return
+
+    # Use current market price (bid preferred)
+    last_price = state.bid if state.bid and state.bid > 0 else state.ask
+    if last_price is None or last_price <= 0:
+        print(f"[ATR] {symbol}: Watcher no valid bid/ask; skipping sync.")
+        return
+
+    tp_price = round(float(last_price + atr_value * ATR_TP_MULTIPLIER_DEFAULT), 2)
+    sl_price = round(float(last_price - atr_value * ATR_STOP_MULTIPLIER_DEFAULT), 2)
+
+    if sl_price <= 0:
+        print(f"[ATR] {symbol}: Watcher computed SL<=0; skipping sync.")
+        return
+
+    # Quantity split: 33% TP, remainder SL; no fractional shares.
+    tp_qty = int(pos_qty * 0.33)
+    if pos_qty >= 2 and tp_qty < 1:
+        tp_qty = 1
+
+    sl_qty = pos_qty - tp_qty
+
+    # If only 1 share, protect it with SL; TP disabled
+    if pos_qty == 1:
+        tp_qty = 0
+        sl_qty = 1
+
+    if sl_qty <= 0:
+        sl_qty = pos_qty
+        tp_qty = 0
+
+    print(
+        f"{symbol}: Watcher sync exits. pos={pos_qty}, TP_qty={tp_qty}, SL_qty={sl_qty}, "
+        f"TP={tp_price:.2f}, SL={sl_price:.2f}"
+    )
+
+    _recreate_tp_sl_orders_if_needed(
+        symbol=symbol,
+        desired_tp_qty=tp_qty,
+        desired_sl_qty=sl_qty,
+        tp_price=tp_price,
+        sl_price=sl_price,
+        extended=extended,
+    )
 
 # ---------------------------------------------------------------------------
 # Order submission helpers

@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+from models import SymbolState
 
 import pytz
 
@@ -12,9 +13,11 @@ from broker import (
     reconcile_position,
     ensure_exit_orders_for_symbol,
     cancel_all_open_orders,
+    cancel_all_open_orders_for_symbol,
     flatten_all,
     cancel_stale_entry_orders_for_symbol,
     replace_stale_entry_buy_limit_if_needed,
+    watch_and_sync_exit_orders,
     EntryReplaceState,
 )
 
@@ -218,13 +221,13 @@ def _set_entry_cooldown(symbol: str, seconds: float) -> None:
     _entry_replace_state[symbol] = st
 
 
-def _process_symbol(symbol: str, in_ext: bool) -> None:
+def _process_symbol(symbol: str, in_ext: bool) -> Optional[SymbolState]:
     """Single-symbol decision cycle."""
     try:
         state = build_symbol_state(symbol)
     except Exception as e:
         print(f"[WARN] Failed to build state for {symbol}: {e}")
-        return
+        return None
 
     # Per-symbol cooldown after stale entry cancellation or too many replaces
     st = _entry_replace_state.get(symbol)
@@ -232,13 +235,13 @@ def _process_symbol(symbol: str, in_ext: bool) -> None:
     if st and now_epoch < getattr(st, "cooldown_until_epoch", 0):
         remaining = int(st.cooldown_until_epoch - now_epoch)
         print(f"[ENTRY] {symbol}: cooldown active ({remaining}s). Skipping.")
-        return
+        return None
 
     try:
         target = decide_target_position(state)
     except Exception as e:
         print(f"[WARN] Strategy error for {symbol}: {e}")
-        return
+        return None
 
     # Determine if this cycle is trying to place an ENTRY limit buy
     is_flat = abs(state.position_qty) < 1e-6
@@ -277,7 +280,7 @@ def _process_symbol(symbol: str, in_ext: bool) -> None:
                 f"Cooldown {ENTRY_RETRY_COOLDOWN_SECONDS}s."
             )
             _set_entry_cooldown(symbol, ENTRY_RETRY_COOLDOWN_SECONDS)
-            return  # skip reconcile this iteration
+            return None  # skip reconcile this iteration
 
         # 2) If not canceled, we may still want to replace (chase) if conditions met.
         st = _entry_replace_state.get(symbol, EntryReplaceState())
@@ -299,7 +302,7 @@ def _process_symbol(symbol: str, in_ext: bool) -> None:
 
         if did_replace:
             # Important: skip reconcile this iteration to prevent double-submit
-            return
+            return None
 
         # 3) Safety: if we have exhausted replaces, cancel and cool down.
         #    We do not assume exact field name, but we try common ones.
@@ -313,33 +316,29 @@ def _process_symbol(symbol: str, in_ext: bool) -> None:
                 f"Cancelling stale entry and cooling down."
             )
             try:
-                cancel_all_open_orders_for_symbol = getattr(
-                    __import__("broker"), "cancel_all_open_orders_for_symbol", None
-                )
-                if callable(cancel_all_open_orders_for_symbol):
-                    cancel_all_open_orders_for_symbol(symbol)
-                else:
-                    cancel_all_open_orders()  # fallback
+                cancel_all_open_orders_for_symbol(symbol)
             except Exception as e:
                 print(f"[WARN] Failed to cancel orders after max replaces for {symbol}: {e}")
 
             _set_entry_cooldown(symbol, ENTRY_RETRY_COOLDOWN_SECONDS)
-            return
+            return None
+        
 
     # Normal reconciliation path
     try:
         reconcile_position(state, target, extended=in_ext)
     except Exception as e:
         print(f"[WARN] reconcile_position failed for {symbol}: {e}")
-        return
+        return None
 
     # Exit orders management (SL/TP logic lives in broker.py)
     try:
         ensure_exit_orders_for_symbol(state, extended=in_ext)
     except Exception as e:
         print(f"[WARN] ensure_exit_orders_for_symbol failed for {symbol}: {e}")
-        return
-
+        return None
+    
+    return state
 
 # -----------------------------
 # Main loop
@@ -385,14 +384,17 @@ def main(
                     break
 
             for symbol in symbols_to_trade:
-                _process_symbol(symbol=symbol, in_ext=in_ext)
+                state = _process_symbol(symbol=symbol, in_ext=in_ext)
+                if state is not None:
+                    watch_and_sync_exit_orders(state, extended=in_ext)
+
 
             time.sleep(interval_seconds)
 
     except KeyboardInterrupt:
         print("\n\n[EXIT] Ctrl+C received. Exiting gracefully.")
 
-
+ 
 if __name__ == "__main__":
     symbols = load_symbols_from_watchlist(WATCHLIST_PATH)
     print(f"✓ Loaded {len(symbols)} symbols from {WATCHLIST_PATH.as_posix()}")
